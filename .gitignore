@@ -1,0 +1,28 @@
+# build outputs
+/build/
+/cmake-build-*/
+*.o
+*.a
+*.so
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+.eggs/
+
+# generated feature headers are committed (they are inputs), but keep the
+# npz source out of git unless deliberately vendored
+tools/assets/mel_filters.npz
+
+# local checkpoints / converted weights
+*.pt
+*.pth
+*.gguf
+
+# editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
