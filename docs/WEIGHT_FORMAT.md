@@ -151,3 +151,55 @@ Each file carries three KV entries for identification only:
 Note the LLM checkpoint keys may live under a prefix (e.g. a wrapped
 `state_dict`); `extract_state_dict()` unwraps `state_dict`/`model`/`module`
 wrappers automatically, and `--strip-prefix` handles any remaining namespace.
+
+## 6. External validation
+
+The round-trip test (`tests/test_convert.py`) proves the writer and reader in
+`tools/gguf.py` are self-consistent, but both could share the same wrong
+assumption. To close that gap, the format was validated against the **real GGML
+library's** loader.
+
+**Method.** A throwaway checkout of ggml was built and `tests/gguf_cross_check.cpp`
+was linked against `libggml-base.so`. The program calls the official
+`gguf_init_from_file()` on a `.gguf` produced by `tools/convert_weights.py` and,
+for every tensor, reports the name, `ggml_type`, `ne` dimension list, byte size,
+and a byte-level FNV-1a 64-bit checksum of the raw data read back from the file.
+`tests/cross_check.py` generates the source `state_dict`, converts it, runs the
+C++ binary, and compares each field against the source tensor.
+
+**ggml used.** commit `e91ded1` (`e91ded11bdcd78c42f9c8d3978ff6686eb4c1226`),
+"ggml : bump version to 0.23.0 (#1618)", version `0.23.0`.
+
+**Result.** PASS. `gguf_init_from_file` returned a valid context (no error); the
+reported tensor count (9) matched the source; and every tensor's name (and
+order), type, `ne` (= reversed PyTorch shape), byte size, and FNV-1a checksum
+matched the source `state_dict` exactly. This includes the implicit checks the
+round-trip test cannot exercise:
+
+- ggml's reader **asserts each tensor's on-disk offset equals the running padded
+  sum** of the preceding tensors' sizes; loading succeeded, so the
+  alignment/offset arithmetic (alignment 32, offsets relative to the data blob,
+  each tensor padded) is byte-correct.
+- `ne` ordering and the dtype→`ggml_type` mapping are confirmed against ggml's
+  own `ggml_type_name()` / `gguf_get_tensor_ne()`.
+
+**Caveat (reported as-is).** The real `flow.pt` / `hift.pt` / `llm.pt` checkpoints
+were not present in the repo, so the validation used a synthetic but
+representative `state_dict` covering the dtypes and shapes the converter is
+designed for — f32/f16/bf16/f64/i32, 1-D through 4-D (including a 4-D conv
+weight and a 3-D tensor). The GGUF container treats all dtypes and dimensions
+uniformly, so this exercises the full read/write path; no format issue was
+found to report or fix.
+
+**Reproduce** (from the repo root):
+
+```sh
+git clone --depth 1 https://github.com/ggml-org/ggml.git third_party/ggml-verify
+cmake -S third_party/ggml-verify -B third_party/ggml-verify/build \
+      -DGGML_BUILD_EXAMPLES=OFF -DGGML_BUILD_TESTS=OFF
+cmake --build third_party/ggml-verify/build --target ggml -j
+.venv/bin/python tests/cross_check.py
+```
+
+`third_party/ggml-verify/` is git-ignored: it is a one-off validation build, kept
+separate from the GGML dependency the Phase 2 modeling code will actually link.

@@ -1,6 +1,10 @@
 # build outputs
 /build/
 /cmake-build-*/
+
+# throwaway ggml checkout used only for GGUF format cross-validation
+# (NOT the Phase 2 modeling dependency — that is added separately)
+/third_party/ggml-verify/
 *.o
 *.a
 *.so
