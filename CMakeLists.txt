@@ -27,6 +27,17 @@ if(LARYNX_ENABLE_CUDA)
   endif()
 endif()
 
+# --- GGML (tensor library backend, vendored as a git submodule) --------------
+# One compute path for the Flow decoder (and later LLM/HiFT): GGML's own CUDA
+# kernels. Build the CPU backend always; add CUDA when LARYNX_ENABLE_CUDA and a
+# CUDA toolchain exist. See docs/ARCHITECTURE.md and docs/adr/0001.
+set(GGML_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(GGML_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+if(LARYNX_ENABLE_CUDA AND CMAKE_CUDA_COMPILER)
+  set(GGML_CUDA ON CACHE BOOL "" FORCE)
+endif()
+add_subdirectory(third_party/ggml)
+
 # --- DSP frontend (pure C++, no dependencies) --------------------------------
 add_library(larynx_dsp STATIC
   src/dsp/log_mel.cpp
@@ -41,8 +52,16 @@ target_include_directories(larynx_frontend PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/in
 add_library(larynx_llm STATIC src/llm/llm.cpp)
 target_include_directories(larynx_llm PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
-add_library(larynx_flow STATIC src/flow/flow.cpp)
+add_library(larynx_flow STATIC
+  src/flow/flow.cpp
+  src/flow/ops.cpp
+  src/flow/gguf.cpp
+  src/flow/prelookahead.cpp
+  src/flow/dit.cpp
+  src/flow/flow_matching.cpp
+)
 target_include_directories(larynx_flow PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(larynx_flow PUBLIC ggml)
 
 add_library(larynx_hift STATIC src/hift/hift.cpp)
 target_include_directories(larynx_hift PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -65,9 +84,18 @@ target_link_libraries(larynx PRIVATE
 add_executable(larynx_dump tests/dump_features.cpp)
 target_link_libraries(larynx_dump PRIVATE larynx_dsp)
 
+# Test utility used by tests/verify_flow.py: runs the Flow decoder and dumps
+# per-stage tensors for comparison against the PyTorch reference.
+add_executable(larynx_flow_dump tests/flow_dump.cpp)
+target_link_libraries(larynx_flow_dump PRIVATE larynx_flow)
+
 # --- Tests (Python-driven numerical verification) ----------------------------
 enable_testing()
 add_test(NAME dsp_numerical
   COMMAND ${CMAKE_COMMAND} -E env
           LARYNX_DUMP=$<TARGET_FILE:larynx_dump>
           python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_dsp.py)
+add_test(NAME flow_numerical
+  COMMAND ${CMAKE_COMMAND} -E env
+          LARYNX_FLOW_DUMP=$<TARGET_FILE:larynx_flow_dump>
+          python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_flow.py)
