@@ -8,6 +8,7 @@
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
 #include "ggml-cpu.h"
+#include "larynx/backend.h"
 
 namespace larynx::flow {
 
@@ -38,6 +39,7 @@ constexpr float ROPE_FREQ_BASE = 10000.0f;
 // ---------------------------------------------------------------------------
 struct FlowWeights {
   ggml_context* ctx = nullptr;
+  ggml_backend_buffer_t buffer = nullptr;  // device buffer the tensors live in
 
   ggml_tensor* input_embedding = nullptr;  // [80, 6561]
 
@@ -100,6 +102,7 @@ struct DiTGraph {
   ggml_tensor* cond_in = nullptr;   // [T, 80, B]
   ggml_tensor* spks_in = nullptr;   // [80, B]
   ggml_tensor* t_emb_in = nullptr;  // [1024, B]
+  ggml_tensor* pos = nullptr;       // [T] i32 position ids (rotary)
   ggml_tensor* dphi = nullptr;      // [T, 80, B]
 
   // capture references (valid after a compute)
@@ -125,13 +128,14 @@ ggml_tensor* grouped_conv1d(ggml_context* ctx, ggml_tensor* kernel, ggml_tensor*
 ggml_tensor* mish(ggml_context* ctx, ggml_tensor* x);
 // GELU(tanh) — assembled from primitives to avoid ggml_gelu's FP16 lookup table
 // (which is only ~1e-3 accurate and would dominate the numerical error).
-ggml_tensor* gelu_tanh(ggml_context* ctx, ggml_tensor* x);
+ggml_tensor* gelu_tanh(ggml_context* ctx, ggml_tensor* x, TensorInit* init);
 // Partial rotary (first n_dims channels only), position indexed by ne2.
 // q = [D, T, B]; pos = [T] i32.
 ggml_tensor* rope_partial(ggml_context* ctx, ggml_tensor* q, ggml_tensor* pos, int n_dims);
 // AdaLayerNorm modulation: norm(x) * (1 + scale) + shift.
 // x = [D, T, B]; scale/shift = [D, B].
-ggml_tensor* ada_ln(ggml_context* ctx, ggml_tensor* x, ggml_tensor* scale, ggml_tensor* shift);
+ggml_tensor* ada_ln(ggml_context* ctx, ggml_tensor* x, ggml_tensor* scale, ggml_tensor* shift,
+                    TensorInit* init);
 // L2 normalize over ne0 (F.normalize(dim=1)): x / max(sqrt(sum(x^2)), 1e-12).
 ggml_tensor* l2_normalize(ggml_context* ctx, ggml_tensor* x);
 // repeat_interleave(x, 2, dim=0) — x = [T, C, N] -> [2T, C, N].
@@ -152,7 +156,7 @@ ggml_tensor* build_prelookahead(ggml_context* ctx, const FlowWeights& w, ggml_te
 // ---------------------------------------------------------------------------
 // dit.cpp
 // ---------------------------------------------------------------------------
-DiTGraph build_dit(ggml_context* ctx, const FlowWeights& w, int T, int B);
+DiTGraph build_dit(ggml_context* ctx, const FlowWeights& w, int T, int B, TensorInit* init);
 
 // ---------------------------------------------------------------------------
 // flow_matching.cpp

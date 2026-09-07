@@ -88,10 +88,44 @@ def tensor_to_bytes(t):
     return t.contiguous().numpy().tobytes()
 
 
+def merge_weight_norm(state_dict):
+    """Fold torch ``weight_norm`` parametrizations into a single effective weight.
+
+    ``torch.nn.utils.parametrizations.weight_norm`` stores two parameters per
+    wrapped module — ``.parametrizations.weight.original0`` (the magnitude ``g``,
+    shape ``(OC, 1, 1)``) and ``.parametrizations.weight.original1`` (the
+    direction ``v``, shape ``(OC, IC, K)``). The effective weight the forward
+    pass actually uses is ``w = v * g / ||v||_2`` (norm over every non-output
+    dimension), so we bake that in here and drop the parametrization entries,
+    yielding a plain ``<module>.weight`` (what ``remove_weight_norm`` would
+    produce). Checkpoints without parametrizations (flow/llm) pass through
+    unchanged.
+    """
+    g_suffix = ".parametrizations.weight.original0"
+    v_suffix = ".parametrizations.weight.original1"
+
+    prefixes = set()
+    for name in state_dict:
+        if name.endswith(g_suffix):
+            prefixes.add(name[: -len(g_suffix)])
+
+    if not prefixes:
+        return state_dict
+
+    out = {name: t for name, t in state_dict.items()
+           if not name.endswith(g_suffix) and not name.endswith(v_suffix)}
+    for prefix in prefixes:
+        g = state_dict[prefix + g_suffix]   # (OC, 1, 1)
+        v = state_dict[prefix + v_suffix]   # (OC, IC, K)
+        norm = torch.sqrt(torch.sum(v * v, dim=tuple(range(1, v.dim())), keepdim=True))
+        out[prefix + ".weight"] = (v * (g / norm)).contiguous()
+    return out
+
+
 def convert_one(checkpoint_path, arch, out_path, use_f16, strip_prefix):
     print(f"  {checkpoint_path} -> {out_path}")
     obj = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    state_dict = extract_state_dict(obj)
+    state_dict = merge_weight_norm(extract_state_dict(obj))
 
     tensors = []
     n_f16 = 0

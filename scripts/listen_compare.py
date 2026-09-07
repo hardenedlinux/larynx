@@ -1,34 +1,30 @@
 #!/usr/bin/env python3
-"""Side-by-side listening comparison for the Flow-decoder acceptance gate.
+"""Side-by-side listening comparison for Larynx acceptance gates.
 
 Serves a single local web page that plays two WAV files next to each other so
-you can A/B them:
-
-  - ``wav_ggml.wav``      — mel from the GGML Flow decoder, vocoded by the
-                            official Python HiFT.
-  - ``wav_reference.wav`` — the full official Python inference (LLM → Flow →
-                            HiFT).
-
-Both are produced from the *same* real speech-token sequence by
-``tests/acceptance_wavs.py``, so any audible difference is attributable to the
-GGML Flow decoder (vs. the PyTorch reference flow) — the HiFT vocoder is
-identical on both sides.
+you can A/B them. Generic by design: pass any two WAV files and their real
+filenames are what get shown on the page — nothing about the labels is
+hardcoded, so this same script is meant to be reused across phases (Flow-only,
+all-GGML, HiFT-only, whatever pair you're comparing) without editing it.
 
 The server is stdlib-only (``http.server``): no pip dependencies, no framework.
 It binds to ``0.0.0.0`` only, serves the two files plus the comparison page,
 and exits when you Ctrl-C.
 
 Usage:
-    python3 scripts/listen_compare.py [ggml_wav] [reference_wav] [--port 8765]
+    python3 scripts/listen_compare.py <file_a> <file_b> [--port 8765]
+                                      [--label-a TEXT] [--label-b TEXT]
                                       [--no-browser]
 
 Defaults:
-    ggml_wav      = wavs/wav_ggml.wav
-    reference_wav = wavs/wav_reference.wav
-    port          = 8765
+    file_a  = wavs/wav_ggml_full.wav
+    file_b  = wavs/wav_reference.wav
+    labels  = each file's basename, unless overridden with --label-a/--label-b
+    port    = 8765
 """
 
 import argparse
+import html
 import os
 import socket
 import sys
@@ -51,70 +47,83 @@ def get_local_ip():
 
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DEFAULT_GGML = os.path.join(ROOT, "wavs", "wav_ggml.wav")
-DEFAULT_REF = os.path.join(ROOT, "wavs", "wav_reference.wav")
+DEFAULT_A = os.path.join(ROOT, "wavs", "wav_ggml_full.wav")
+DEFAULT_B = os.path.join(ROOT, "wavs", "wav_reference.wav")
 
-# These two files are the only paths the server will read from disk. Everything
-# else is in-memory, so the surface area is small and the directory can't be
-# walked via path traversal.
-_GGML_PATH = DEFAULT_GGML
-_REF_PATH = DEFAULT_REF
+# Internal route names are intentionally decoupled from the real filenames —
+# the browser doesn't care what the URL path is called, only the labels
+# shown on the page need to reflect the actual files being compared.
+_PATH_A = DEFAULT_A
+_PATH_B = DEFAULT_B
+_LABEL_A = os.path.basename(DEFAULT_A)
+_LABEL_B = os.path.basename(DEFAULT_B)
 
-PAGE = """<!doctype html>
+
+def render_page():
+    """Build the HTML fresh from whatever files/labels are currently set,
+    instead of a frozen template with filenames baked in."""
+    label_a = html.escape(_LABEL_A)
+    label_b = html.escape(_LABEL_B)
+    path_a = html.escape(_PATH_A)
+    path_b = html.escape(_PATH_B)
+    return f"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Larynx Flow decoder — A/B listening</title>
+<title>Larynx — A/B listening</title>
 <style>
-  :root { color-scheme: dark; }
-  * { box-sizing: border-box; }
-  body {
+  :root {{ color-scheme: dark; }}
+  * {{ box-sizing: border-box; }}
+  body {{
     font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     margin: 0; padding: 2rem; background: #14161a; color: #e6e8eb;
     max-width: 1100px; margin-inline: auto;
-  }
-  h1 { font-size: 1.3rem; font-weight: 650; margin: 0 0 .25rem; }
-  .sub { color: #9aa0a6; font-size: .9rem; margin-bottom: 1.5rem; }
-  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
-  @media (max-width: 720px) { .grid { grid-template-columns: 1fr; } }
-  .card {
+  }}
+  h1 {{ font-size: 1.3rem; font-weight: 650; margin: 0 0 .25rem; }}
+  .sub {{ color: #9aa0a6; font-size: .9rem; margin-bottom: 1.5rem; }}
+  .grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }}
+  @media (max-width: 720px) {{ .grid {{ grid-template-columns: 1fr; }} }}
+  .card {{
     background: #1d2025; border: 1px solid #2a2e35; border-radius: 10px;
     padding: 1.1rem 1.25rem 1.25rem;
-  }
-  .card h2 { font-size: 1rem; margin: 0 0 .15rem; font-weight: 600; }
-  .tag {
+  }}
+  .card h2 {{
+    font-size: .95rem; margin: 0 0 .15rem; font-weight: 600;
+    word-break: break-all;
+  }}
+  .tag {{
     display: inline-block; font-size: .72rem; letter-spacing: .04em;
     padding: .1rem .5rem; border-radius: 999px; margin-bottom: .8rem;
-  }
-  .tag.ggml { background: #123a2a; color: #7ee2b0; }
-  .tag.ref  { background: #1d2b4a; color: #8fb8ff; }
-  audio { width: 100%; margin-top: .4rem; }
-  .missing {
+  }}
+  .tag.a {{ background: #123a2a; color: #7ee2b0; }}
+  .tag.b {{ background: #1d2b4a; color: #8fb8ff; }}
+  audio {{ width: 100%; margin-top: .4rem; }}
+  .missing {{
     color: #e5484d; font-size: .85rem; margin-top: .6rem;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  }
-  .btn-row { margin-top: .9rem; display: flex; gap: .5rem; flex-wrap: wrap; }
-  button {
+  }}
+  .btn-row {{ margin-top: .9rem; display: flex; gap: .5rem; flex-wrap: wrap; }}
+  button {{
     background: #2a2e35; color: #e6e8eb; border: 1px solid #3a3f47;
     padding: .35rem .7rem; border-radius: 7px; cursor: pointer; font-size: .82rem;
-  }
-  button:hover { background: #333842; }
-  .foot { margin-top: 1.75rem; color: #7c828a; font-size: .82rem; }
-  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  }}
+  button:hover {{ background: #333842; }}
+  .foot {{ margin-top: 1.75rem; color: #7c828a; font-size: .82rem; }}
+  code {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }}
 </style>
 </head>
 <body>
-  <h1>Larynx — Flow decoder A/B</h1>
-  <div class="sub">Same real speech tokens, two decoders, identical HiFT vocoder.
-    Differences are the GGML Flow decoder vs. the PyTorch reference flow.</div>
+  <h1>Larynx — A/B listening</h1>
+  <div class="sub">Same input, two renders. Whatever difference you hear is
+    attributable to whatever differs between these two files — check the
+    paths below to know exactly what's being compared.</div>
 
   <div class="grid">
     <div class="card">
-      <span class="tag ggml">GGML</span>
-      <h2>wav_ggml.wav</h2>
-      <div class="sub">GGML Flow decoder mel → Python HiFT</div>
-      <audio id="a" controls loop preload="auto" src="/wav_ggml.wav"></audio>
+      <span class="tag a">A</span>
+      <h2>{label_a}</h2>
+      <audio id="a" controls loop preload="auto" src="/file_a.wav"></audio>
       <div class="btn-row">
         <button onclick="play('a')">Play</button>
         <button onclick="stop('a')">Stop</button>
@@ -125,10 +134,9 @@ PAGE = """<!doctype html>
     </div>
 
     <div class="card">
-      <span class="tag ref">REFERENCE</span>
-      <h2>wav_reference.wav</h2>
-      <div class="sub">Full official Python inference</div>
-      <audio id="b" controls loop preload="auto" src="/wav_reference.wav"></audio>
+      <span class="tag b">B</span>
+      <h2>{label_b}</h2>
+      <audio id="b" controls loop preload="auto" src="/file_b.wav"></audio>
       <div class="btn-row">
         <button onclick="play('b')">Play</button>
         <button onclick="stop('b')">Stop</button>
@@ -140,32 +148,30 @@ PAGE = """<!doctype html>
   </div>
 
   <div class="foot">
-    Generated by <code>tests/acceptance_wavs.py</code>; served by
-    <code>scripts/listen_compare.py</code>. Files:
-    <code id="ggml-path"></code> and <code id="ref-path"></code>.
+    A: <code>{path_a}</code><br>
+    B: <code>{path_b}</code>
   </div>
 
   <script>
-    const play = (id) => {
+    const play = (id) => {{
       const el = document.getElementById(id);
-      el.play().catch((err) => {
+      el.play().catch((err) => {{
         alert("播放失败: " + err.name + " — " + err.message);
         console.error("play() failed for #" + id, err);
-      });
-    };
-    const stop = (id) => {
+      }});
+    }};
+    const stop = (id) => {{
       const a = document.getElementById(id);
       a.pause(); a.currentTime = 0;
-    };
-    // Surface a missing/broken file in the card rather than a silent dead player.
-    for (const [id, mId, pId] of [["a", "m-a", "p-a"], ["b", "m-b", "p-b"]]) {
+    }};
+    for (const [id, mId, pId] of [["a", "m-a", "p-a"], ["b", "m-b", "p-b"]]) {{
       const el = document.getElementById(id);
-      el.addEventListener("error", () => {
+      el.addEventListener("error", () => {{
         document.getElementById(mId).style.display = "block";
         document.getElementById(pId).textContent = el.getAttribute("src");
         console.error("media error for #" + id, el.error);
-      });
-    }
+      }});
+    }}
   </script>
 </body>
 </html>
@@ -191,23 +197,24 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?", 1)[0]
         if path == "/" or path == "/index.html":
-            self._send(200, PAGE.encode(), "text/html; charset=utf-8")
+            body = render_page().encode()
+            self._send(200, body, "text/html; charset=utf-8")
             return
-        if path == "/wav_ggml.wav":
-            self._serve_file(_GGML_PATH)
+        if path == "/file_a.wav":
+            self._serve_file(_PATH_A)
             return
-        if path == "/wav_reference.wav":
-            self._serve_file(_REF_PATH)
+        if path == "/file_b.wav":
+            self._serve_file(_PATH_B)
             return
         self._send(404, b"not found\n", "text/plain")
 
     def do_HEAD(self):
         path = self.path.split("?", 1)[0]
         target = None
-        if path == "/wav_ggml.wav":
-            target = _GGML_PATH
-        elif path == "/wav_reference.wav":
-            target = _REF_PATH
+        if path == "/file_a.wav":
+            target = _PATH_A
+        elif path == "/file_b.wav":
+            target = _PATH_B
         if target is None or not os.path.isfile(target):
             self.send_response(404)
             self.end_headers()
@@ -271,27 +278,31 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Serve a local A/B page for the two flow-decoder WAVs.")
-    ap.add_argument("ggml_wav", nargs="?", default=DEFAULT_GGML)
-    ap.add_argument("reference_wav", nargs="?", default=DEFAULT_REF)
+    ap = argparse.ArgumentParser(description="Serve a local A/B page for any two WAV files.")
+    ap.add_argument("file_a", nargs="?", default=DEFAULT_A, help="first WAV (default: %(default)s)")
+    ap.add_argument("file_b", nargs="?", default=DEFAULT_B, help="second WAV (default: %(default)s)")
+    ap.add_argument("--label-a", default=None, help="override the displayed label for file_a (default: its basename)")
+    ap.add_argument("--label-b", default=None, help="override the displayed label for file_b (default: its basename)")
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--no-browser", action="store_true", help="don't auto-open the browser")
     args = ap.parse_args()
 
-    global _GGML_PATH, _REF_PATH
-    _GGML_PATH = os.path.abspath(args.ggml_wav)
-    _REF_PATH = os.path.abspath(args.reference_wav)
+    global _PATH_A, _PATH_B, _LABEL_A, _LABEL_B
+    _PATH_A = os.path.abspath(args.file_a)
+    _PATH_B = os.path.abspath(args.file_b)
+    _LABEL_A = args.label_a or os.path.basename(_PATH_A)
+    _LABEL_B = args.label_b or os.path.basename(_PATH_B)
 
-    for label, p in (("ggml", _GGML_PATH), ("reference", _REF_PATH)):
+    for label, p in ((_LABEL_A, _PATH_A), (_LABEL_B, _PATH_B)):
         if not os.path.isfile(p):
-            print(f"[warn] {label} WAV not found: {p}", file=sys.stderr)
-            print("       the page will show it as missing; run tests/acceptance_wavs.py first.", file=sys.stderr)
+            print(f"[warn] not found: {label} -> {p}", file=sys.stderr)
+            print("       the page will show it as missing until the file exists.", file=sys.stderr)
 
     server = ThreadingHTTPServer(("0.0.0.0", args.port), Handler)
     url = f"http://{get_local_ip()}:{args.port}/"
     print(f"Serving A/B comparison at {url}")
-    print(f"  ggml      : {_GGML_PATH}")
-    print(f"  reference : {_REF_PATH}")
+    print(f"  A ({_LABEL_A}) : {_PATH_A}")
+    print(f"  B ({_LABEL_B}) : {_PATH_B}")
     print("  Ctrl-C to stop.")
 
     if not args.no_browser:
@@ -307,3 +318,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    

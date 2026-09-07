@@ -31,11 +31,69 @@ endif()
 # One compute path for the Flow decoder (and later LLM/HiFT): GGML's own CUDA
 # kernels. Build the CPU backend always; add CUDA when LARYNX_ENABLE_CUDA and a
 # CUDA toolchain exist. See docs/ARCHITECTURE.md and docs/adr/0001.
+#
+# GGML is statically linked into larynx and its tools so the built artifacts are
+# self-contained: BUILD_SHARED_LIBS=OFF makes ggml-base/ggml-cpu/ggml-cuda static
+# archives instead of shared libraries (ldd must not show libggml-*.so). This is
+# distinct from GGML_STATIC, which adds a full `-static` system link and is NOT
+# what we want here. See docs/adr/0002.
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "build ggml as static libraries" FORCE)
+
 set(GGML_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(GGML_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 if(LARYNX_ENABLE_CUDA AND CMAKE_CUDA_COMPILER)
   set(GGML_CUDA ON CACHE BOOL "" FORCE)
 endif()
+
+# --- Apply vendored-GGML patches (idempotent) --------------------------------
+# GGML is pinned as a git submodule, but we carry local source patches that fix
+# upstream behavior we cannot accept as-is (see docs/adr/0002). Patches are
+# applied here at configure time, before ggml compiles. Idempotent: a patch whose
+# change is already present is skipped; a patch that applies neither forward nor
+# reverse (upstream diverged) aborts configure with a clear message rather than
+# silently building wrong code.
+set(LARYNX_GGML_SRC "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ggml")
+file(GLOB LARYNX_GGML_PATCHES "${CMAKE_CURRENT_SOURCE_DIR}/patches/*.patch")
+list(SORT LARYNX_GGML_PATCHES)
+foreach(_patch IN LISTS LARYNX_GGML_PATCHES)
+  get_filename_component(_patch_name "${_patch}" NAME)
+
+  # Forward check: would this patch apply onto the current tree?
+  execute_process(
+    COMMAND git apply --check "${_patch}"
+    WORKING_DIRECTORY "${LARYNX_GGML_SRC}"
+    RESULT_VARIABLE _fwd
+    OUTPUT_VARIABLE _fwd_out ERROR_VARIABLE _fwd_err)
+  if(_fwd EQUAL 0)
+    execute_process(
+      COMMAND git apply "${_patch}"
+      WORKING_DIRECTORY "${LARYNX_GGML_SRC}"
+      RESULT_VARIABLE _apply
+      OUTPUT_VARIABLE _apply_out ERROR_VARIABLE _apply_err)
+    if(NOT _apply EQUAL 0)
+      message(FATAL_ERROR "Failed to apply ggml patch ${_patch_name}:\n${_apply_err}")
+    endif()
+    message(STATUS "Applied ggml patch: ${_patch_name}")
+    continue()
+  endif()
+
+  # Reverse check: is the change already present?
+  execute_process(
+    COMMAND git apply --check --reverse "${_patch}"
+    WORKING_DIRECTORY "${LARYNX_GGML_SRC}"
+    RESULT_VARIABLE _rev
+    OUTPUT_VARIABLE _rev_out ERROR_VARIABLE _rev_err)
+  if(_rev EQUAL 0)
+    message(STATUS "ggml patch already applied (skipping): ${_patch_name}")
+    continue()
+  endif()
+
+  # Neither applies -> upstream source changed; do not build silently.
+  message(FATAL_ERROR
+    "patch 应用失败，可能是 GGML 版本升级导致代码变化，需要手动检查更新 patch 内容: ${_patch_name}\n"
+    "  forward: ${_fwd_err}\n  reverse: ${_rev_err}")
+endforeach()
+
 add_subdirectory(third_party/ggml)
 
 # --- DSP frontend (pure C++, no dependencies) --------------------------------
@@ -63,8 +121,14 @@ add_library(larynx_flow STATIC
 target_include_directories(larynx_flow PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(larynx_flow PUBLIC ggml)
 
-add_library(larynx_hift STATIC src/hift/hift.cpp)
+add_library(larynx_hift STATIC
+  src/hift/hift.cpp
+  src/hift/ops.cpp
+  src/hift/gguf.cpp
+  src/hift/source.cpp
+)
 target_include_directories(larynx_hift PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(larynx_hift PUBLIC ggml)
 
 add_library(larynx_pipeline STATIC src/pipeline/pipeline.cpp)
 target_include_directories(larynx_pipeline PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -89,13 +153,26 @@ target_link_libraries(larynx_dump PRIVATE larynx_dsp)
 add_executable(larynx_flow_dump tests/flow_dump.cpp)
 target_link_libraries(larynx_flow_dump PRIVATE larynx_flow)
 
+# Test utility used by tests/verify_hift.py: runs the HiFT vocoder and dumps
+# per-stage tensors for comparison against the PyTorch reference.
+add_executable(larynx_hift_dump tests/hift_dump.cpp)
+target_link_libraries(larynx_hift_dump PRIVATE larynx_hift)
+
 # --- Tests (Python-driven numerical verification) ----------------------------
+# The verify scripts need numpy (+ torch for the flow/hift ones). Use the repo's
+# .venv python rather than the system `python3`, which has neither.
+set(LARYNX_PYTHON "${CMAKE_CURRENT_SOURCE_DIR}/.venv/bin/python" CACHE FILEPATH
+    "Python interpreter (with numpy/torch) used to run the verify scripts")
 enable_testing()
 add_test(NAME dsp_numerical
   COMMAND ${CMAKE_COMMAND} -E env
           LARYNX_DUMP=$<TARGET_FILE:larynx_dump>
-          python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_dsp.py)
+          ${LARYNX_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_dsp.py)
 add_test(NAME flow_numerical
   COMMAND ${CMAKE_COMMAND} -E env
           LARYNX_FLOW_DUMP=$<TARGET_FILE:larynx_flow_dump>
-          python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_flow.py)
+          ${LARYNX_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_flow.py)
+add_test(NAME hift_numerical
+  COMMAND ${CMAKE_COMMAND} -E env
+          LARYNX_HIFT_DUMP=$<TARGET_FILE:larynx_hift_dump>
+          ${LARYNX_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_hift.py)

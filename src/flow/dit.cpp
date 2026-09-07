@@ -51,7 +51,7 @@ ggml_tensor* attention(ggml_context* ctx, ggml_tensor* q, ggml_tensor* k, ggml_t
 }
 
 ggml_tensor* dit_block(ggml_context* ctx, const FlowWeights::Block& blk, ggml_tensor* x,
-                       ggml_tensor* t, ggml_tensor* pos, int T, int B) {
+                       ggml_tensor* t, ggml_tensor* pos, int T, int B, TensorInit* init) {
   // AdaLayerNormZero: emb = linear(silu(t)) -> [6144, B], chunk into 6 x [1024, B].
   ggml_tensor* emb = linear(ctx, blk.attn_norm_w, blk.attn_norm_b, ggml_silu(ctx, t));
   ggml_tensor* shift_msa = view_chunk(ctx, emb, 0);
@@ -61,7 +61,7 @@ ggml_tensor* dit_block(ggml_context* ctx, const FlowWeights::Block& blk, ggml_te
   ggml_tensor* scale_mlp = view_chunk(ctx, emb, 4);
   ggml_tensor* gate_mlp  = view_chunk(ctx, emb, 5);
 
-  ggml_tensor* norm = ada_ln(ctx, x, scale_msa, shift_msa);
+  ggml_tensor* norm = ada_ln(ctx, x, scale_msa, shift_msa, init);
 
   ggml_tensor* q = rope_partial(ctx, linear(ctx, blk.to_q_w, blk.to_q_b, norm), pos, ROT_DIM);
   ggml_tensor* k = rope_partial(ctx, linear(ctx, blk.to_k_w, blk.to_k_b, norm), pos, ROT_DIM);
@@ -70,8 +70,8 @@ ggml_tensor* dit_block(ggml_context* ctx, const FlowWeights::Block& blk, ggml_te
 
   x = ggml_add(ctx, x, ggml_mul(ctx, attn, ggml_reshape_3d(ctx, gate_msa, DIM, 1, B)));
 
-  ggml_tensor* ff_norm = ada_ln(ctx, x, scale_mlp, shift_mlp);
-  ggml_tensor* f1 = gelu_tanh(ctx, linear(ctx, blk.ff_0_w, blk.ff_0_b, ff_norm));
+  ggml_tensor* ff_norm = ada_ln(ctx, x, scale_mlp, shift_mlp, init);
+  ggml_tensor* f1 = gelu_tanh(ctx, linear(ctx, blk.ff_0_w, blk.ff_0_b, ff_norm), init);
   ggml_tensor* f2 = linear(ctx, blk.ff_2_w, blk.ff_2_b, f1);
 
   x = ggml_add(ctx, x, ggml_mul(ctx, f2, ggml_reshape_3d(ctx, gate_mlp, DIM, 1, B)));
@@ -80,7 +80,7 @@ ggml_tensor* dit_block(ggml_context* ctx, const FlowWeights::Block& blk, ggml_te
 
 }  // namespace
 
-DiTGraph build_dit(ggml_context* ctx, const FlowWeights& w, int T, int B) {
+DiTGraph build_dit(ggml_context* ctx, const FlowWeights& w, int T, int B, TensorInit* init) {
   DiTGraph g;
 
   // Inputs (Space A = [seq, channel, batch] = PyTorch (B, C, T)).
@@ -90,9 +90,10 @@ DiTGraph build_dit(ggml_context* ctx, const FlowWeights& w, int T, int B) {
   g.spks_in  = new_input2(ctx, GGML_TYPE_F32, MEL_DIM, B, "spks");
   g.t_emb_in = new_input2(ctx, GGML_TYPE_F32, DIM, B, "t_emb");
 
-  // Position ids [0..T-1].
+  // Position ids [0..T-1]. Data is written by the caller after the graph is
+  // allocated on the backend (with no_alloc=true there is no data pointer yet).
   ggml_tensor* pos = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, T);
-  for (int i = 0; i < T; i++) ((int32_t*)pos->data)[i] = i;
+  g.pos = pos;
 
   // Space A -> Space B ([feature, seq, batch] = PyTorch (B, T, C)).
   ggml_tensor* x    = ggml_permute(ctx, g.x_in, 1, 0, 2, 3);
@@ -124,7 +125,7 @@ DiTGraph build_dit(ggml_context* ctx, const FlowWeights& w, int T, int B) {
   ggml_tensor* t = g.t_emb_in;  // host-computed time embedding, [1024, B]
 
   for (int i = 0; i < DEPTH; i++) {
-    h = dit_block(ctx, w.block[i], h, t, pos, T, B);
+    h = dit_block(ctx, w.block[i], h, t, pos, T, B, init);
     g.blocks[i] = h;
   }
 
@@ -132,7 +133,7 @@ DiTGraph build_dit(ggml_context* ctx, const FlowWeights& w, int T, int B) {
   ggml_tensor* emb = linear(ctx, w.norm_out_w, w.norm_out_b, ggml_silu(ctx, t));  // [2048, B]
   ggml_tensor* scale = ggml_cont(ctx, ggml_view_2d(ctx, emb, DIM, B, emb->ne[0] * 4, 0));
   ggml_tensor* shift = ggml_cont(ctx, ggml_view_2d(ctx, emb, DIM, B, emb->ne[0] * 4, DIM * 4));
-  g.norm_out = ada_ln(ctx, h, scale, shift);
+  g.norm_out = ada_ln(ctx, h, scale, shift, init);
 
   // proj_out -> Space A output.
   ggml_tensor* proj = linear(ctx, w.proj_out_w, w.proj_out_b, g.norm_out);  // [80, T, B]

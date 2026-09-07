@@ -5,6 +5,8 @@
 
 #include "gguf.h"
 
+#include "larynx/backend.h"
+
 namespace larynx::flow {
 
 namespace {
@@ -29,7 +31,7 @@ bool load_weights(const std::string& path, ggml_backend_t backend,
                   FlowWeights* out, TimeMlpHost* time_mlp) {
   ggml_context* wctx = nullptr;
   struct gguf_init_params params = {
-      /*.no_alloc =*/ false,
+      /*.no_alloc =*/ true,  // tensors get their data in the backend buffer below
       /*.ctx      =*/ &wctx,
   };
   struct gguf_context* gctx = gguf_init_from_file(path.c_str(), params);
@@ -37,8 +39,6 @@ bool load_weights(const std::string& path, ggml_backend_t backend,
     fprintf(stderr, "flow: failed to load '%s'\n", path.c_str());
     return false;
   }
-  gguf_free(gctx);
-  (void)backend;  // CPU keeps weights in the host context buffer (CUDA swap is a later phase)
 
   out->ctx = wctx;
   auto* w = out;
@@ -89,11 +89,22 @@ bool load_weights(const std::string& path, ggml_backend_t backend,
   w->proj_out_w = get_tensor(wctx, "decoder.estimator.proj_out.weight");
   w->proj_out_b = get_tensor(wctx, "decoder.estimator.proj_out.bias");
 
+  // Upload the weights into the backend buffer (CPU keeps them in a host buffer,
+  // CUDA in device memory). Must happen before any host copy below, which reads
+  // the tensors back through the backend.
+  w->buffer = upload_gguf_weights(gctx, wctx, backend, path);
+  gguf_free(gctx);
+  if (!w->buffer) {
+    ggml_free(wctx);
+    out->ctx = nullptr;
+    return false;
+  }
+
   // Copy the time-embedding MLP to host (it runs outside the DiT graph).
   if (time_mlp != nullptr) {
     auto copy = [](ggml_tensor* t, std::vector<float>* dst) {
       dst->resize(ggml_nelements(t));
-      memcpy(dst->data(), t->data, ggml_nbytes(t));
+      ggml_backend_tensor_get(t, dst->data(), 0, ggml_nbytes(t));
     };
     copy(w->time_mlp_0_w, &time_mlp->w0);
     copy(w->time_mlp_0_b, &time_mlp->b0);

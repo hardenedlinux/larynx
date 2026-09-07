@@ -1,6 +1,7 @@
 #include "larynx/flow/flow.h"
 
 #include "internal.h"
+#include "larynx/backend.h"
 
 #include <cmath>
 #include <cstring>
@@ -17,7 +18,7 @@ constexpr float PI = 3.14159265358979323846f;
 
 void read_tensor(ggml_tensor* t, std::vector<float>& dst) {
   dst.resize(ggml_nelements(t));
-  memcpy(dst.data(), t->data, ggml_nbytes(t));
+  ggml_backend_tensor_get(t, dst.data(), 0, ggml_nbytes(t));
 }
 
 }  // namespace
@@ -33,6 +34,7 @@ FlowDecoder::FlowDecoder() : impl_(new Impl()) {}
 
 FlowDecoder::~FlowDecoder() {
   if (impl_) {
+    if (impl_->w.buffer) ggml_backend_buffer_free(impl_->w.buffer);
     if (impl_->w.ctx) ggml_free(impl_->w.ctx);
     if (impl_->backend) ggml_backend_free(impl_->backend);
     delete impl_;
@@ -41,7 +43,7 @@ FlowDecoder::~FlowDecoder() {
 
 bool FlowDecoder::load(const std::string& path) {
   if (impl_->loaded) return true;
-  impl_->backend = ggml_backend_cpu_init();
+  impl_->backend = backend_init_best();
   if (!impl_->backend) return false;
   if (!load_weights(path, impl_->backend, &impl_->w, &impl_->time_mlp)) {
     ggml_backend_free(impl_->backend);
@@ -77,21 +79,18 @@ bool FlowDecoder::infer(const std::vector<int32_t>& prompt_tokens,
   for (int i = 0; i < Tt; i++) tok_idx[P + i] = tokens[i] < 0 ? 0 : tokens[i];
 
   // ---- Frontend graph (run once): spk / token_embed / prelookahead / mu / cond ----
-  ggml_init_params fp = {.mem_size = 64 * 1024 * 1024, .mem_buffer = nullptr, .no_alloc = false};
+  ggml_init_params fp = {.mem_size = 64 * 1024 * 1024, .mem_buffer = nullptr, .no_alloc = true};
   ggml_context* fctx = ggml_init(fp);
   if (!fctx) return false;
 
   ggml_tensor* f_spk = ggml_new_tensor_2d(fctx, GGML_TYPE_F32, SPK_EMBED_DIM, 1);
   ggml_set_input(f_spk);
-  memcpy(f_spk->data, spk_embedding.data(), sizeof(float) * spk_embedding.size());
 
   ggml_tensor* f_tok = ggml_new_tensor_1d(fctx, GGML_TYPE_I32, Tseq);
   ggml_set_input(f_tok);
-  memcpy(f_tok->data, tok_idx.data(), sizeof(int32_t) * Tseq);
 
   ggml_tensor* f_pf = ggml_new_tensor_3d(fctx, GGML_TYPE_F32, MEL_DIM, MEL_LEN1, 1);
   ggml_set_input(f_pf);
-  memcpy(f_pf->data, prompt_feat.data(), sizeof(float) * prompt_feat.size());
 
   ggml_tensor* spk = linear(fctx, impl_->w.spk_affine_w, impl_->w.spk_affine_b,
                             l2_normalize(fctx, f_spk));                    // [80, 1]
@@ -107,6 +106,11 @@ bool FlowDecoder::infer(const std::vector<int32_t>& prompt_tokens,
   ggml_build_forward_expand(fg, spk);
   ggml_build_forward_expand(fg, mu);
   ggml_build_forward_expand(fg, cond);
+
+  ggml_backend_buffer_t fbuf = ggml_backend_alloc_ctx_tensors(fctx, impl_->backend);
+  ggml_backend_tensor_set(f_spk, spk_embedding.data(), 0, sizeof(float) * spk_embedding.size());
+  ggml_backend_tensor_set(f_tok, tok_idx.data(), 0, sizeof(int32_t) * Tseq);
+  ggml_backend_tensor_set(f_pf, prompt_feat.data(), 0, sizeof(float) * prompt_feat.size());
   ggml_backend_graph_compute(impl_->backend, fg);
 
   std::vector<float> spk_h, mu_h, cond_h;
@@ -121,25 +125,26 @@ bool FlowDecoder::infer(const std::vector<int32_t>& prompt_tokens,
     read_tensor(mu, debug->mu);                     // (1, 80, 24)
     read_tensor(cond, debug->cond);                 // (1, 80, 24)
   }
+  if (fbuf) ggml_backend_buffer_free(fbuf);
   ggml_free(fctx);
 
   // ---- DiT graph (built once, run 10x across the CFM steps) ----
   const int B = 2;
-  // The DiT graph is built eagerly (`no_alloc=false`), so the context pool must
-  // hold every intermediate activation at once. Measured via ggml_used_mem:
-  //   MEL_T=24  -> 241 MB,   MEL_T=344 -> 3995 MB
-  // i.e. ~22 blocks * (two [T,T,HEADS,B] attention tensors + ~54 [DIM,T,B]
-  // cont/permute/linear intermediates). Size the pool from MEL_T with ~1.3x
-  // headroom instead of a fixed constant, so real sequences don't OOM.
-  const size_t per_block_bytes =
-      2ull * (size_t)MEL_T * MEL_T * HEADS * B * sizeof(float) +   // KQ + softmax out
-      54ull * (size_t)DIM * MEL_T * B * sizeof(float);             // cont/permute/linear copies
-  const size_t dit_mem = 16ull * 1024 * 1024 + (size_t)DEPTH * per_block_bytes * 13 / 10;
-  ggml_init_params dp = {.mem_size = dit_mem, .mem_buffer = nullptr, .no_alloc = false};
+  // no_alloc=true: the ctx holds only tensor/graph metadata; the actual data
+  // lives in a backend buffer (device memory on CUDA) allocated just below. The
+  // graph uses ggml_new_graph_custom(ctx, 8192), so reserve metadata for that
+  // many nodes plus the leaf inputs/views created alongside them.
+  const size_t dit_mem =
+      ggml_tensor_overhead() * (size_t)65536 +
+      ggml_graph_overhead_custom(8192, false);
+  ggml_init_params dp = {.mem_size = dit_mem, .mem_buffer = nullptr, .no_alloc = true};
   ggml_context* dctx = ggml_init(dp);
   if (!dctx) return false;
 
-  DiTGraph g = build_dit(dctx, impl_->w, MEL_T, B);
+  TensorInit init;
+  DiTGraph g = build_dit(dctx, impl_->w, MEL_T, B, &init);
+  ggml_backend_buffer_t dbuf = ggml_backend_alloc_ctx_tensors(dctx, impl_->backend);
+  init.apply();
 
   // t_span = 1 - cos(linspace(0, 1, 11) * pi/2)
   std::vector<float> t_span(N_TIMESTEPS + 1);
@@ -161,9 +166,14 @@ bool FlowDecoder::infer(const std::vector<int32_t>& prompt_tokens,
   memcpy(mu_in.data(), mu_h.data(), sizeof(float) * n_xy);
   memcpy(cond_in.data(), cond_h.data(), sizeof(float) * n_xy);
   memcpy(spks_in.data(), spk_h.data(), sizeof(float) * MEL_DIM);
-  memcpy(g.mu_in->data, mu_in.data(), mu_in.size() * sizeof(float));
-  memcpy(g.cond_in->data, cond_in.data(), cond_in.size() * sizeof(float));
-  memcpy(g.spks_in->data, spks_in.data(), spks_in.size() * sizeof(float));
+  ggml_backend_tensor_set(g.mu_in, mu_in.data(), 0, mu_in.size() * sizeof(float));
+  ggml_backend_tensor_set(g.cond_in, cond_in.data(), 0, cond_in.size() * sizeof(float));
+  ggml_backend_tensor_set(g.spks_in, spks_in.data(), 0, spks_in.size() * sizeof(float));
+
+  // Position ids [0..T-1] for the partial rotary embedding.
+  std::vector<int32_t> pos_host((size_t)MEL_T);
+  for (int i = 0; i < MEL_T; i++) pos_host[i] = i;
+  ggml_backend_tensor_set(g.pos, pos_host.data(), 0, sizeof(int32_t) * MEL_T);
 
   std::vector<float> x_in((size_t)2 * n_xy);
   std::vector<float> t_emb_in((size_t)2 * DIM);
@@ -178,13 +188,13 @@ bool FlowDecoder::infer(const std::vector<int32_t>& prompt_tokens,
     // x_in = [x; x]
     memcpy(x_in.data(), x.data(), sizeof(float) * n_xy);
     memcpy(x_in.data() + n_xy, x.data(), sizeof(float) * n_xy);
-    memcpy(g.x_in->data, x_in.data(), x_in.size() * sizeof(float));
+    ggml_backend_tensor_set(g.x_in, x_in.data(), 0, x_in.size() * sizeof(float));
 
     // t_emb_in = [time_embed(t); time_embed(t)]
     std::vector<float> te = time_embed_host(t, impl_->time_mlp);
     memcpy(t_emb_in.data(), te.data(), sizeof(float) * DIM);
     memcpy(t_emb_in.data() + DIM, te.data(), sizeof(float) * DIM);
-    memcpy(g.t_emb_in->data, t_emb_in.data(), t_emb_in.size() * sizeof(float));
+    ggml_backend_tensor_set(g.t_emb_in, t_emb_in.data(), 0, t_emb_in.size() * sizeof(float));
 
     ggml_backend_graph_compute(impl_->backend, g.gf);
 
@@ -218,6 +228,7 @@ bool FlowDecoder::infer(const std::vector<int32_t>& prompt_tokens,
 
   if (debug) debug->feat = mel;
 
+  if (dbuf) ggml_backend_buffer_free(dbuf);
   ggml_free(dctx);
   return true;
 }

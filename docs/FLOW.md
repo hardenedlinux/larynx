@@ -13,8 +13,11 @@ non-streaming `finalize=True` path.
 | `DiT` ×22 | `cosyvoice/flow/DiT/dit.py` | InputEmbedding + CausalConvPositionEmbedding + TimestepEmbedding + 22 DiTBlock + norm_out + proj_out |
 | CFM Euler solver | `cosyvoice/flow/flow_matching.py` `CausalConditionalCFM` | 10 steps, batch=2N CFG, cosine t_span |
 
-All compute runs on the ggml CPU backend this phase (`ggml_backend_cpu_init`).
-CUDA is a drop-in backend swap later; weights stay in the graph as F32, no
+All compute runs on the GGML backend chosen by `ggml_backend_init_best()` —
+CUDA when `LARYNX_ENABLE_CUDA=ON` and a device is present, else CPU. On CUDA the
+cuBLAS math mode is pinned to `CUBLAS_DEFAULT_MATH` (TF32 tensor cores disabled)
+by `patches/0001`; see `docs/adr/0002` for why TF32 otherwise causes ~3e-2
+relative error in the F32 GEMMs. Weights stay in the graph as F32, no
 quantization.
 
 ---
@@ -155,10 +158,13 @@ is not importable on this box), loads `flow.pt`'s state_dict, and dumps
 per-stage tensors to `flow_ref.npz`. `larynx_flow_dump` runs the C++ decoder on
 the same inputs and dumps the same stages; `verify_flow.py` compares them.
 
-Environment: `torch 2.14.0+cpu` + `numpy`, CPU-only, single-threaded reference,
-deterministic inputs (seed 1234) + deterministic CFM noise (seed 0). Validation
-case: 4 prompt tokens + 8 tokens → 12 speech tokens → 24 mel frames → 16 output
-mel frames.
+Environment: `torch 2.14.0+cpu` + `numpy` for the reference; the C++ decoder
+runs on either the CPU or the CUDA backend (TF32 disabled) and they agree to
+~2× on deep-block *absolute* error, same order on every stage. Deterministic
+inputs (seed 1234) + deterministic CFM noise (seed 0). Validation case: 4 prompt
+tokens + 8 tokens → 12 speech tokens → 24 mel frames → 16 output mel frames.
+The table below is the CUDA result; the CPU result differs only in the 4th
+significant digit.
 
 `max` / `mean` are absolute error over the whole tensor; `rel` is
 `max_abs / max|ref|` (scale-normalized — see below). Both sides are float32, but
@@ -167,43 +173,43 @@ kernels, so the gap is floating-point accumulation, not a bug.
 
 | stage | max abs | mean abs | rel err |
 |---|---|---|---|
-| spk | 7.1e-08 | 1.8e-08 | 1.5e-07 |
+| spk | 9.3e-08 | 2.4e-08 | 1.9e-07 |
 | token_embed | 0.0 | 0.0 | 0.0 |
-| prelookahead | 7.7e-07 | 1.9e-07 | 2.2e-07 |
-| mu | 7.7e-07 | 1.9e-07 | 2.2e-07 |
+| prelookahead | 9.5e-07 | 1.9e-07 | 2.7e-07 |
+| mu | 9.5e-07 | 1.9e-07 | 2.7e-07 |
 | cond | 0.0 | 0.0 | 0.0 |
 | time_embed | 3.2e-06 | 5.7e-08 | 7.9e-07 |
-| input_proj | 9.5e-06 | 8.9e-08 | 3.8e-07 |
-| conv_pos | 2.5e-05 | 2.1e-07 | 1.0e-06 |
-| input_embed | 2.5e-05 | 2.6e-07 | 9.7e-07 |
-| norm_out | 1.6e-03 | 2.2e-05 | 4.2e-04 |
-| dphi | 1.2e-03 | 4.9e-05 | 1.0e-04 |
-| **feat (final mel)** | **8.7e-04** | **6.5e-05** | **9.1e-05** |
-| block[00] | 4.6e-05 | 4.2e-07 | 4.1e-07 |
-| block[01] | 5.0e-05 | 5.5e-07 | 4.2e-07 |
-| block[02] | 1.3e-03 | 1.5e-05 | 1.0e-05 |
-| block[03] | 7.7e-04 | 1.8e-05 | 5.5e-06 |
-| block[04] | 1.5e-03 | 2.1e-05 | 1.0e-05 |
-| block[05] | 1.1e-03 | 1.8e-05 | 6.8e-06 |
-| block[06] | 1.0e-03 | 2.0e-05 | 6.2e-06 |
-| block[07] | 9.1e-04 | 2.1e-05 | 5.2e-06 |
-| block[08] | 8.5e-04 | 2.1e-05 | 4.5e-06 |
-| block[09] | 1.0e-03 | 2.1e-05 | 5.2e-06 |
-| block[10] | 9.9e-04 | 2.3e-05 | 4.9e-06 |
-| block[11] | 9.2e-04 | 2.4e-05 | 4.3e-06 |
-| block[12] | 1.0e-03 | 2.6e-05 | 4.7e-06 |
-| block[13] | 9.3e-04 | 2.7e-05 | 4.1e-06 |
-| block[14] | 1.1e-03 | 2.8e-05 | 4.6e-06 |
-| block[15] | 1.1e-03 | 3.0e-05 | 4.5e-06 |
-| block[16] | 9.3e-04 | 3.2e-05 | 3.7e-06 |
-| block[17] | 6.4e-03 | 4.8e-05 | 2.5e-05 |
-| block[18] | 3.7e-02 | 2.5e-04 | 1.4e-04 |
-| block[19] | 5.7e-02 | 1.1e-03 | 2.1e-04 |
-| block[20] | 5.7e-02 | 1.1e-03 | 1.9e-04 |
-| block[21] | 4.9e-02 | 1.2e-03 | 1.8e-04 |
+| input_proj | 5.7e-06 | 8.3e-08 | 2.3e-07 |
+| conv_pos | 1.2e-04 | 7.5e-07 | 5.0e-06 |
+| input_embed | 1.2e-04 | 7.9e-07 | 4.7e-06 |
+| norm_out | 2.1e-03 | 3.9e-05 | 5.3e-04 |
+| dphi | 2.0e-03 | 7.4e-05 | 1.7e-04 |
+| **feat (final mel)** | **1.1e-03** | **9.5e-05** | **1.1e-04** |
+| block[00] | 1.4e-04 | 1.4e-06 | 1.2e-06 |
+| block[01] | 1.6e-04 | 1.9e-06 | 1.4e-06 |
+| block[02] | 1.1e-03 | 1.9e-05 | 8.8e-06 |
+| block[03] | 1.1e-03 | 2.3e-05 | 8.0e-06 |
+| block[04] | 2.6e-03 | 2.9e-05 | 1.8e-05 |
+| block[05] | 1.9e-03 | 2.6e-05 | 1.2e-05 |
+| block[06] | 1.9e-03 | 2.8e-05 | 1.2e-05 |
+| block[07] | 1.9e-03 | 3.0e-05 | 1.1e-05 |
+| block[08] | 1.8e-03 | 3.0e-05 | 9.8e-06 |
+| block[09] | 1.9e-03 | 3.1e-05 | 9.9e-06 |
+| block[10] | 1.8e-03 | 3.3e-05 | 8.8e-06 |
+| block[11] | 2.4e-03 | 3.6e-05 | 1.1e-05 |
+| block[12] | 2.4e-03 | 3.9e-05 | 1.1e-05 |
+| block[13] | 2.3e-03 | 4.0e-05 | 1.0e-05 |
+| block[14] | 2.2e-03 | 4.3e-05 | 9.1e-06 |
+| block[15] | 2.3e-03 | 4.5e-05 | 9.3e-06 |
+| block[16] | 1.6e-03 | 4.8e-05 | 6.3e-06 |
+| block[17] | 1.9e-02 | 9.7e-05 | 7.2e-05 |
+| block[18] | 5.5e-02 | 3.6e-04 | 2.1e-04 |
+| block[19] | 9.7e-02 | 1.9e-03 | 3.5e-04 |
+| block[20] | 7.9e-02 | 2.0e-03 | 2.7e-04 |
+| block[21] | 1.0e-01 | 2.1e-03 | 3.9e-04 |
 
-Worst stage by scale-normalized error: `norm_out` (rel 4.2e-04). Every stage is
-well under 1e-3 relative; the final mel is within ~9e-5 relative.
+Worst stage by scale-normalized error: `norm_out` (rel 5.3e-04). Every stage is
+well under 1e-3 relative; the final mel is within ~1.1e-4 relative.
 
 ### Why the deep-block *absolute* error looks large (and why it's fine)
 
@@ -235,27 +241,32 @@ exercises the decoder end-to-end on one **real** speech-token sequence:
 (`inference_instruct2`), wrapping `model.flow.inference` to capture the exact
 inputs the reference flow consumes (prompt tokens, tokens, prompt mel, 192-dim
 speaker embedding) plus the deterministic CFM noise, then replays those inputs
-through the C++ `FlowDecoder` and vocodes the resulting mel with the **same**
-official Python HiFT. It writes:
+through the C++ `FlowDecoder` and vocodes the resulting mel. It writes:
 
-- `wavs/wav_reference.wav` — full official Python inference.
-- `wavs/wav_ggml.wav` — GGML Flow decoder mel → Python HiFT.
+- `wavs/wav_reference.wav` — full official Python inference (LLM → flow → HiFT).
+- `wavs/wav_ggml.wav` — GGML Flow decoder mel → official Python HiFT.
+- `wavs/wav_ggml_full.wav` — GGML Flow decoder mel → GGML HiFT (all-GGML; see
+  `docs/HIFT.md`).
 
 Because the HiFT vocoder and the flow inputs are identical on both sides, any
-audible difference is attributable solely to the GGML Flow decoder. On the 3.4 s
-/ 344-mel-frame validation utterance the two mels agree to **1.8e-3** max
-absolute error (7.6e-5 mean), consistent with the float32 accumulation above.
-`scripts/listen_compare.py` serves a local page to A/B the two WAVs. Run the
-gate with `CUDA_VISIBLE_DEVICES=""` when the GPU is otherwise occupied (the
-CosyVoice package requires several GB of VRAM for the LLM + flow).
+audible difference between `wav_ggml.wav` and `wav_reference.wav` is attributable
+solely to the GGML Flow decoder. On the 2.92 s / 146-mel-frame validation
+utterance the two mels agree to **9.0e-3** max / **3.0e-4** mean absolute error
+(≈8e-4 scale-normalized), consistent with the float32 accumulation above, and
+the resulting waveforms agree to **3.0e-1** max / **5.8e-3** mean (16-bit
+full-scale) after HiFT's nonlinear mel→waveform amplification.
+
+Because the full DiT graph needs ~3.5 GiB of VRAM and the resident PyTorch
+LLM+flow hold ~4.5 GiB (an 8 GiB GPU cannot hold both), the script frees
+`model.llm` + `model.flow` after the reference run and before invoking the C++
+decoder, keeping only the HiFT for the vocoding step. `scripts/listen_compare.py`
+serves a local page to A/B the WAVs.
 
 ## 5. Deferred (per the task scope)
 
 - **Streaming branch** — `PreLookaheadLayer` with `context` input and chunk
   incremental inference are not implemented; this is the whole-sequence
   (`finalize=True`) path only.
-- **CUDA backend** — the graph is backend-agnostic; `ggml_backend_cpu_init` is
-  the only backend wired this phase.
 - **HiFT vocoder, LLM backbone, CLI main flow** — separate later phases.
 - **ONNX-trace-specific mask workarounds** (the `torch.where` / Or-Not patches)
   are deliberately *not* carried over — they are artifacts of the ONNX export,

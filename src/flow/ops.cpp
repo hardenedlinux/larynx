@@ -6,12 +6,12 @@ namespace larynx::flow {
 
 namespace {
 
-// Fresh [1]-shaped scalar constant = 1.0f. Created in the graph context (with
-// no_alloc=false its data lives in the ctx buffer and is copied to the backend
-// by ggml_backend_alloc_ctx_tensors).
-ggml_tensor* make_one(ggml_context* ctx) {
+// Fresh [1]-shaped scalar constant = 1.0f. Created in the graph context with
+// no_alloc=true, so its data is NULL here; the value is registered in `init`
+// and written once the tensors are placed in the backend buffer.
+ggml_tensor* make_one(ggml_context* ctx, TensorInit* init) {
   ggml_tensor* t = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 1);
-  ((float*)t->data)[0] = 1.0f;
+  init->fill_scalar(t, 1.0f);
   return t;
 }
 
@@ -70,7 +70,7 @@ ggml_tensor* mish(ggml_context* ctx, ggml_tensor* x) {
   return ggml_mul(ctx, x, ggml_tanh(ctx, ggml_softplus(ctx, x)));
 }
 
-ggml_tensor* gelu_tanh(ggml_context* ctx, ggml_tensor* x) {
+ggml_tensor* gelu_tanh(ggml_context* ctx, ggml_tensor* x, TensorInit* init) {
   // 0.5*x*(1 + tanh(sqrt(2/pi)*(x + 0.044715*x^3))) — matches nn.GELU("tanh").
   const float c0 = 0.044715f;
   const float c1 = 0.7978845608028654f;  // sqrt(2/pi)
@@ -78,7 +78,7 @@ ggml_tensor* gelu_tanh(ggml_context* ctx, ggml_tensor* x) {
   ggml_tensor* x3 = ggml_mul(ctx, x2, x);
   ggml_tensor* inner = ggml_add(ctx, x, ggml_scale(ctx, x3, c0));  // x + 0.044715*x^3
   inner = ggml_scale(ctx, inner, c1);                              // * sqrt(2/pi)
-  ggml_tensor* t = ggml_add(ctx, ggml_tanh(ctx, inner), make_one(ctx));  // tanh + 1
+  ggml_tensor* t = ggml_add(ctx, ggml_tanh(ctx, inner), make_one(ctx, init));  // tanh + 1
   return ggml_mul(ctx, ggml_scale(ctx, x, 0.5f), t);
 }
 
@@ -91,12 +91,13 @@ ggml_tensor* rope_partial(ggml_context* ctx, ggml_tensor* q, ggml_tensor* pos, i
   return ggml_cont(ctx, ggml_permute(ctx, r, 0, 2, 1, 3));  // cont for downstream reshape
 }
 
-ggml_tensor* ada_ln(ggml_context* ctx, ggml_tensor* x, ggml_tensor* scale, ggml_tensor* shift) {
+ggml_tensor* ada_ln(ggml_context* ctx, ggml_tensor* x, ggml_tensor* scale, ggml_tensor* shift,
+                    TensorInit* init) {
   const int64_t D = x->ne[0];
   const int64_t B = x->ne[2];
   ggml_tensor* n = ggml_norm(ctx, x, LN_EPS);                 // [D, T, B]
   ggml_tensor* s = ggml_reshape_3d(ctx, scale, D, 1, B);      // [D, 1, B]
-  ggml_tensor* one = make_one(ctx);
+  ggml_tensor* one = make_one(ctx, init);
   ggml_tensor* s1 = ggml_add(ctx, s, one);                    // 1 + scale
   ggml_tensor* y = ggml_mul(ctx, n, s1);                      // norm * (1 + scale)
   return ggml_add(ctx, y, ggml_reshape_3d(ctx, shift, D, 1, B));
