@@ -182,7 +182,20 @@ kernels, so the gap is floating-point accumulation, not a bug.
 | block[00] | 4.6e-05 | 4.2e-07 | 4.1e-07 |
 | block[01] | 5.0e-05 | 5.5e-07 | 4.2e-07 |
 | block[02] | 1.3e-03 | 1.5e-05 | 1.0e-05 |
-| block[03..16] | ≤1.5e-03 | ≤3.0e-05 | ≤1.0e-05 |
+| block[03] | 7.7e-04 | 1.8e-05 | 5.5e-06 |
+| block[04] | 1.5e-03 | 2.1e-05 | 1.0e-05 |
+| block[05] | 1.1e-03 | 1.8e-05 | 6.8e-06 |
+| block[06] | 1.0e-03 | 2.0e-05 | 6.2e-06 |
+| block[07] | 9.1e-04 | 2.1e-05 | 5.2e-06 |
+| block[08] | 8.5e-04 | 2.1e-05 | 4.5e-06 |
+| block[09] | 1.0e-03 | 2.1e-05 | 5.2e-06 |
+| block[10] | 9.9e-04 | 2.3e-05 | 4.9e-06 |
+| block[11] | 9.2e-04 | 2.4e-05 | 4.3e-06 |
+| block[12] | 1.0e-03 | 2.6e-05 | 4.7e-06 |
+| block[13] | 9.3e-04 | 2.7e-05 | 4.1e-06 |
+| block[14] | 1.1e-03 | 2.8e-05 | 4.6e-06 |
+| block[15] | 1.1e-03 | 3.0e-05 | 4.5e-06 |
+| block[16] | 9.3e-04 | 3.2e-05 | 3.7e-06 |
 | block[17] | 6.4e-03 | 4.8e-05 | 2.5e-05 |
 | block[18] | 3.7e-02 | 2.5e-04 | 1.4e-04 |
 | block[19] | 5.7e-02 | 1.1e-03 | 2.1e-04 |
@@ -213,6 +226,28 @@ The decisive evidence that it is accumulation and **not** a structural bug:
 To reproduce: build (`cmake -S . -B build && cmake --build build`), then
 `.venv/bin/python tests/flow_reference.py` (→ `tests/flow_ref.npz`) and
 `.venv/bin/python tests/verify_flow.py`.
+
+### Real-speech-token acceptance gate
+
+The table above is a synthetic small-input check. The acceptance gate also
+exercises the decoder end-to-end on one **real** speech-token sequence:
+`tests/acceptance_wavs.py` runs the full official CosyVoice3 pipeline
+(`inference_instruct2`), wrapping `model.flow.inference` to capture the exact
+inputs the reference flow consumes (prompt tokens, tokens, prompt mel, 192-dim
+speaker embedding) plus the deterministic CFM noise, then replays those inputs
+through the C++ `FlowDecoder` and vocodes the resulting mel with the **same**
+official Python HiFT. It writes:
+
+- `wavs/wav_reference.wav` — full official Python inference.
+- `wavs/wav_ggml.wav` — GGML Flow decoder mel → Python HiFT.
+
+Because the HiFT vocoder and the flow inputs are identical on both sides, any
+audible difference is attributable solely to the GGML Flow decoder. On the 3.4 s
+/ 344-mel-frame validation utterance the two mels agree to **1.8e-3** max
+absolute error (7.6e-5 mean), consistent with the float32 accumulation above.
+`scripts/listen_compare.py` serves a local page to A/B the two WAVs. Run the
+gate with `CUDA_VISIBLE_DEVICES=""` when the GPU is otherwise occupied (the
+CosyVoice package requires several GB of VRAM for the LLM + flow).
 
 ## 5. Deferred (per the task scope)
 

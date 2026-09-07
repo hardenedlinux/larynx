@@ -125,7 +125,17 @@ bool FlowDecoder::infer(const std::vector<int32_t>& prompt_tokens,
 
   // ---- DiT graph (built once, run 10x across the CFM steps) ----
   const int B = 2;
-  ggml_init_params dp = {.mem_size = 512 * 1024 * 1024, .mem_buffer = nullptr, .no_alloc = false};
+  // The DiT graph is built eagerly (`no_alloc=false`), so the context pool must
+  // hold every intermediate activation at once. Measured via ggml_used_mem:
+  //   MEL_T=24  -> 241 MB,   MEL_T=344 -> 3995 MB
+  // i.e. ~22 blocks * (two [T,T,HEADS,B] attention tensors + ~54 [DIM,T,B]
+  // cont/permute/linear intermediates). Size the pool from MEL_T with ~1.3x
+  // headroom instead of a fixed constant, so real sequences don't OOM.
+  const size_t per_block_bytes =
+      2ull * (size_t)MEL_T * MEL_T * HEADS * B * sizeof(float) +   // KQ + softmax out
+      54ull * (size_t)DIM * MEL_T * B * sizeof(float);             // cont/permute/linear copies
+  const size_t dit_mem = 16ull * 1024 * 1024 + (size_t)DEPTH * per_block_bytes * 13 / 10;
+  ggml_init_params dp = {.mem_size = dit_mem, .mem_buffer = nullptr, .no_alloc = false};
   ggml_context* dctx = ggml_init(dp);
   if (!dctx) return false;
 
