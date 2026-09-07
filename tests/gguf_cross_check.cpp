@@ -3,9 +3,9 @@
 // Links against a throwaway ggml checkout (third_party/ggml-verify, NOT
 // committed) and loads a .gguf produced by tools/convert_weights.py using the
 // official gguf_init_from_file() entry point. For every tensor it prints the
-// name, GGML type, dimension list (ne), byte size, and a FNV-1a 64-bit checksum
-// of the raw data, so the Python driver (tests/cross_check.py) can compare
-// against the source state_dict byte-for-byte.
+// name, GGML type, dimension list (ne), byte size, and a CRC-32 checksum
+// (zlib/ISO-HDLC) of the raw data, so the Python driver (tests/cross_check.py)
+// can compare against the source state_dict byte-for-byte via zlib.crc32.
 //
 // Build (one-off, against the throwaway ggml build):
 //   c++ -std=c++17 -I third_party/ggml-verify/include \
@@ -26,13 +26,26 @@
 #include "gguf.h"
 #include "ggml.h"
 
-static uint64_t fnv1a64(const uint8_t * p, size_t n) {
-    uint64_t h = 1469598103934665603ULL;
-    for (size_t i = 0; i < n; ++i) {
-        h ^= p[i];
-        h *= 1099511628211ULL;
+// CRC-32/ISO-HDLC (the same as zlib.crc32): reflected polynomial 0xEDB88320,
+// init 0xFFFFFFFF, no post-complement on the way in, final XOR 0xFFFFFFFF.
+static uint32_t crc32(const uint8_t * p, size_t n) {
+    static uint32_t table[256];
+    static bool init = false;
+    if (!init) {
+        for (uint32_t i = 0; i < 256; ++i) {
+            uint32_t c = i;
+            for (int k = 0; k < 8; ++k) {
+                c = (c & 1u) ? (c >> 1) ^ 0xEDB88320u : (c >> 1);
+            }
+            table[i] = c;
+        }
+        init = true;
     }
-    return h;
+    uint32_t c = 0xFFFFFFFFu;
+    for (size_t i = 0; i < n; ++i) {
+        c = table[(c ^ p[i]) & 0xFFu] ^ (c >> 8);
+    }
+    return c ^ 0xFFFFFFFFu;
 }
 
 int main(int argc, char ** argv) {
@@ -77,11 +90,11 @@ int main(int argc, char ** argv) {
         const uint8_t * p = file.data() + data_off + off;
 
         std::printf(
-            "TENSOR %s type=%s ne=%lld,%lld,%lld,%lld size=%zu checksum=%016llx\n",
+            "TENSOR %s type=%s ne=%lld,%lld,%lld,%lld size=%zu checksum=%08x\n",
             name, ggml_type_name(type),
             static_cast<long long>(ne[0]), static_cast<long long>(ne[1]),
             static_cast<long long>(ne[2]), static_cast<long long>(ne[3]),
-            size, static_cast<unsigned long long>(fnv1a64(p, size)));
+            size, static_cast<unsigned int>(crc32(p, size)));
     }
 
     gguf_free(ctx);

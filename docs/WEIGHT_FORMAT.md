@@ -157,24 +157,27 @@ wrappers automatically, and `--strip-prefix` handles any remaining namespace.
 The round-trip test (`tests/test_convert.py`) proves the writer and reader in
 `tools/gguf.py` are self-consistent, but both could share the same wrong
 assumption. To close that gap, the format was validated against the **real GGML
-library's** loader.
+library's** loader, in two complementary rounds.
 
-**Method.** A throwaway checkout of ggml was built and `tests/gguf_cross_check.cpp`
-was linked against `libggml-base.so`. The program calls the official
-`gguf_init_from_file()` on a `.gguf` produced by `tools/convert_weights.py` and,
-for every tensor, reports the name, `ggml_type`, `ne` dimension list, byte size,
-and a byte-level FNV-1a 64-bit checksum of the raw data read back from the file.
-`tests/cross_check.py` generates the source `state_dict`, converts it, runs the
-C++ binary, and compares each field against the source tensor.
+**Method (both rounds).** A throwaway checkout of ggml is built and
+`tests/gguf_cross_check.cpp` is linked against `libggml-base.so`. The program
+calls the official `gguf_init_from_file()` on a `.gguf` produced by
+`tools/convert_weights.py` and, for every tensor, reports the name, `ggml_type`,
+`ne` dimension list, byte size, and a CRC-32 checksum (zlib/ISO-HDLC) of the raw
+data read back from the file. `tests/cross_check.py` compares each field against
+the source `state_dict` byte-for-byte.
 
 **ggml used.** commit `e91ded1` (`e91ded11bdcd78c42f9c8d3978ff6686eb4c1226`),
 "ggml : bump version to 0.23.0 (#1618)", version `0.23.0`.
 
-**Result.** PASS. `gguf_init_from_file` returned a valid context (no error); the
-reported tensor count (9) matched the source; and every tensor's name (and
-order), type, `ne` (= reversed PyTorch shape), byte size, and FNV-1a checksum
-matched the source `state_dict` exactly. This includes the implicit checks the
-round-trip test cannot exercise:
+### Round 1 — synthetic state_dict (container format)
+
+`tests/cross_check.py` with no arguments generates a synthetic but
+representative `state_dict` (f32/f16/bf16/f64/i32, 1-D through 4-D, including a
+4-D conv weight and a 3-D tensor) and validates it. **Result: PASS** — 9
+tensors, every name (and order), type, `ne`, byte size, and CRC-32 checksum
+matched. This proves the container mechanics that the self-consistency
+round-trip cannot:
 
 - ggml's reader **asserts each tensor's on-disk offset equals the running padded
   sum** of the preceding tensors' sizes; loading succeeded, so the
@@ -183,22 +186,60 @@ round-trip test cannot exercise:
 - `ne` ordering and the dtype→`ggml_type` mapping are confirmed against ggml's
   own `ggml_type_name()` / `gguf_get_tensor_ne()`.
 
-**Caveat (reported as-is).** The real `flow.pt` / `hift.pt` / `llm.pt` checkpoints
-were not present in the repo, so the validation used a synthetic but
-representative `state_dict` covering the dtypes and shapes the converter is
-designed for — f32/f16/bf16/f64/i32, 1-D through 4-D (including a 4-D conv
-weight and a 3-D tensor). The GGUF container treats all dtypes and dimensions
-uniformly, so this exercises the full read/write path; no format issue was
-found to report or fix.
+### Round 2 — real CosyVoice3 checkpoints (weight mapping)
+
+The four real checkpoints were downloaded (HF mirror, `FunAudioLLM/Fun-CosyVoice3-0.5B-2512`)
+and each converted + cross-checked with `tests/cross_check.py <ckpt.pt>`:
+
+| checkpoint | tensors | elements | result |
+|---|---|---|---|
+| `flow.pt` (1 329 116 148 B) | 330 | 332 257 120 | PASS |
+| `hift.pt` (83 202 622 B) | 328 | 20 779 887 | PASS |
+| `llm.pt` (2 024 669 519 B) | 293 | 642 283 136 | PASS |
+| `llm.rl.pt` (2 024 682 701 B) | 293 | 642 283 136 | PASS |
+
+For every tensor, the GGML-reported name (and order), `ggml_type` (all `f32`),
+`ne`, byte size, and CRC-32 checksum matched the actual `state_dict`
+byte-for-byte. Findings on the specific concerns:
+
+- **Naming.** `convert_weights.py` keeps the flat PyTorch module path verbatim
+  (no rename table). `flow.pt` keys are flat paths (`input_embedding.weight`,
+  `pre_lookahead_layer.conv1.weight`, `spk_embed_affine_layer.weight`,
+  `decoder.estimator.transformer_blocks.N.*`); the DiT decoder has **22**
+  `transformer_blocks` (indices 0–21), each with 14 tensors (`attn_norm`,
+  `attn.to_q/k/v`, `attn.to_out`, `ff`). No collisions, no dropped tensors —
+  tensor count equals the `state_dict` size exactly for all four files.
+- **Dimension order.** No transpose is performed, and none is needed: GGML
+  stores tensors in the same row-major order as a PyTorch contiguous tensor,
+  with `ne[0]` the fastest-varying dimension (= PyTorch's *last* dimension).
+  So `ne = reversed(shape)` is the identity, transpose-free mapping. A
+  `Conv1d.weight` of shape `(out, in, k)` (e.g. `pre_lookahead_layer.conv1.weight`
+  = `(1024, 80, 4)`) becomes `ne = [k, in, out]`, which is exactly what ggml's
+  conv ops consume. Any layout reinterpretation would be a Phase 2 modeling
+  concern, not a conversion-time transpose — the storage layer is provably
+  byte-faithful.
+- **dtype.** All four checkpoints are pure `float32`, so `--f16` was not needed;
+  `file_type=0` (all-original) in each output.
+
+No format or mapping issue was found; nothing in `tools/gguf.py` or
+`tools/convert_weights.py` needed correction.
 
 **Reproduce** (from the repo root):
 
 ```sh
+# build the throwaway ggml checkout once
 git clone --depth 1 https://github.com/ggml-org/ggml.git third_party/ggml-verify
 cmake -S third_party/ggml-verify -B third_party/ggml-verify/build \
       -DGGML_BUILD_EXAMPLES=OFF -DGGML_BUILD_TESTS=OFF
 cmake --build third_party/ggml-verify/build --target ggml -j
+
+# round 1 (synthetic) and round 2 (real checkpoints)
 .venv/bin/python tests/cross_check.py
+.venv/bin/python tests/cross_check.py \
+    ~/Project/CosyVoice/pretrained_models/Fun-CosyVoice3-0.5B/flow.pt \
+    ~/Project/CosyVoice/pretrained_models/Fun-CosyVoice3-0.5B/hift.pt \
+    ~/Project/CosyVoice/pretrained_models/Fun-CosyVoice3-0.5B/llm.pt \
+    ~/Project/CosyVoice/pretrained_models/Fun-CosyVoice3-0.5B/llm.rl.pt
 ```
 
 `third_party/ggml-verify/` is git-ignored: it is a one-off validation build, kept
