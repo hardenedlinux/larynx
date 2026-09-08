@@ -34,6 +34,12 @@ constexpr int CONV_POS_GROUPS = 16;
 constexpr float LN_EPS        = 1e-6f;
 constexpr float ROPE_FREQ_BASE = 10000.0f;
 
+// CausalConditionalCFM builds one deterministic seed-noise bank at construction
+// time (set_all_random_seed(0) + torch.randn([1, 80, 50*300])). The C++ decoder
+// loads the exported bank verbatim (FlowDecoder::load_noise) and slices the
+// first MEL_T = Tseq*TOKEN_MEL_RATIO columns per call — never regenerates it.
+constexpr int NOISE_MAX_FRAMES = 50 * 300;   // 15,000
+
 // ---------------------------------------------------------------------------
 // Loaded weights (resolved by name from flow.gguf; ne = reversed torch shape)
 // ---------------------------------------------------------------------------

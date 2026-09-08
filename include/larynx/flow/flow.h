@@ -47,16 +47,34 @@ class FlowDecoder {
   // any error (missing file, missing tensor).
   bool load(const std::string& gguf_path);
 
+  // Load the CFM deterministic seed-noise bank (1, 80, 15000) from the asset
+  // exported by tests/export_flow_noise.py. Not in flow.gguf — the reference
+  // builds it from torch.randn(seed 0) at construction, so it is frozen to a
+  // file once and consumed verbatim. Must be called before the 6-arg infer();
+  // the 7-arg infer() takes explicit noise_z instead.
+  bool load_noise(const std::string& noise_path);
+
   // token -> mel. All inputs are laid out as the PyTorch reference emits them
   // (numpy row-major). `noise_z` is the deterministic CFM seed noise, shape
-  // (1, 80, 24). `mel` is filled with the (1, 80, 16) output.
+  // (1, 80, MEL_T) where MEL_T = (prompt_tokens + tokens) * 2. `mel` is filled
+  // with the (1, 80, MEL_T - prompt_feat_len) output.
   bool infer(const std::vector<int32_t>& prompt_tokens,
              const std::vector<int32_t>& tokens,
-             const std::vector<float>& prompt_feat,    // (1, 8, 80)
+             const std::vector<float>& prompt_feat,    // (1, mel_len1, 80)
              const std::vector<float>& spk_embedding,  // (1, 192)
-             const std::vector<float>& noise_z,        // (1, 80, 24)
-             std::vector<float>& mel,                  // out: (1, 80, 16)
+             const std::vector<float>& noise_z,        // (1, 80, MEL_T)
+             std::vector<float>& mel,
              FlowDebug* debug);
+
+  // Production entry point: uses the noise bank loaded by load_noise() (sliced
+  // to MEL_T internally). Equivalent to the 7-arg form fed the first MEL_T
+  // columns of the loaded bank.
+  bool infer(const std::vector<int32_t>& prompt_tokens,
+             const std::vector<int32_t>& tokens,
+             const std::vector<float>& prompt_feat,
+             const std::vector<float>& spk_embedding,
+             std::vector<float>& mel,
+             FlowDebug* debug = nullptr);
 
  private:
   struct Impl;

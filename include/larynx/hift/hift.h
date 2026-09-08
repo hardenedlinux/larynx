@@ -55,16 +55,34 @@ class HiftVocoder {
   // error (missing file, missing tensor).
   bool load(const std::string& gguf_path);
 
+  // Load the SineGen2 fixed source buffers (rand_ini + the full 300 s
+  // sine_waves bank) from the asset exported by tests/export_hift_source.py.
+  // These are not in hift.gguf — the reference model samples them from an
+  // unseeded RNG at construction time, so they are frozen to a file once and
+  // consumed verbatim (never regenerated). Must be called before the 3-arg
+  // vocode(); the 5-arg vocode() takes explicit buffers instead.
+  bool load_source(const std::string& source_path);
+
+  // The buffers loaded by load_source(), for verification (empty until then).
+  const std::vector<float>& source_rand_ini() const;
+  const std::vector<float>& source_sine_waves() const;
+
   // mel -> PCM. `mel` is (1, 80, T_mel) numpy row-major (any T_mel); `rand_ini`
   // (1, 9) and `sine_waves` (1, T_mel*480, 9) are the fixed model-internal
-  // buffers exported by tests/hift_reference.py (must be consumed verbatim,
-  // never regenerated). `audio` is filled with the (1, T_mel*480) output.
-  // Returns false if not loaded or an input has the wrong size.
+  // buffers (consumed verbatim, never regenerated). `audio` is filled with the
+  // (1, T_mel*480) output. Returns false if not loaded or an input has the
+  // wrong size.
   bool vocode(const std::vector<float>& mel,
               const std::vector<float>& rand_ini,
               const std::vector<float>& sine_waves,
               std::vector<float>& audio,
               HiFTDebug* debug);
+
+  // Production entry point: uses the source buffers loaded by load_source()
+  // (slicing the bank to T_mel*480 rows). Equivalent to the 5-arg form called
+  // with the loaded rand_ini and the first T_mel*480 rows of the loaded bank.
+  bool vocode(const std::vector<float>& mel, std::vector<float>& audio,
+              HiFTDebug* debug = nullptr);
 
  private:
   struct Impl;

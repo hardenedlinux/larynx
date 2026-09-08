@@ -47,6 +47,24 @@ class LLM {
   // non-null, captures the 24 per-layer hidden states and the llm_decoder logits.
   bool prefill(const std::vector<float>& lm_input, int L, LLMDebug* debug = nullptr);
 
+  // Assemble the CosyVoice3LM prefill embedding sequence from token ids (the
+  // voice-cloning branch). This is exactly what CosyVoice3LM.inference builds:
+  //
+  //   lm_input = [sos(6561); embed_tokens(text_tokens); task_id(6563);
+  //               speech_embedding(prompt_speech_token)]
+  //
+  // `text_tokens` is already concat([prompt_text, text]) (Qwen2 token ids in
+  // [0, TEXT_VOCAB)); `prompt_speech_token` is the prompt audio's speech-token
+  // sequence ([0, SPEECH_VOCAB), may be empty). `sos`/`task_id` are looked up
+  // from speech_embedding. The flat result is the (1, L, 896) sequence, laid
+  // out [L*896] in row-major (L = 1 + text_tokens.size() + 1 +
+  // prompt_speech_token.size()). Pure table lookup + copy (no arithmetic), so
+  // the result is bit-exact against PyTorch given identical weights. Returns
+  // false on error; on success writes L to `L_out` if non-null.
+  bool build_lm_input(const std::vector<int>& text_tokens,
+                      const std::vector<int>& prompt_speech_token,
+                      std::vector<float>& lm_input, int* L_out = nullptr);
+
   // Single-token autoregressive decode step using the KV cache populated by
   // prefill()/previous decode() calls. `token` is a speech token id in
   // [0, SPEECH_VOCAB); its embedding is looked up from speech_embedding. The

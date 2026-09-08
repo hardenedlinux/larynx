@@ -28,6 +28,11 @@ struct FlowDecoder::Impl {
   FlowWeights w;
   TimeMlpHost time_mlp;
   bool loaded = false;
+
+  // CFM seed-noise bank (from load_noise): the full [80, 15000] buffer, sliced
+  // per call. Empty until load_noise succeeds.
+  std::vector<float> rand_noise;   // (MEL_DIM * NOISE_MAX_FRAMES), [c][t]
+  bool noise_loaded = false;
 };
 
 FlowDecoder::FlowDecoder() : impl_(new Impl()) {}
@@ -51,6 +56,54 @@ bool FlowDecoder::load(const std::string& path) {
     return false;
   }
   impl_->loaded = true;
+  return true;
+}
+
+namespace {
+
+// On-disk layout of the asset written by tests/export_flow_noise.py.
+constexpr uint32_t FNSE_MAGIC = 0x45534E46;  // "FNSE"
+constexpr uint32_t FNSE_VERSION = 1;
+
+}  // namespace
+
+bool FlowDecoder::load_noise(const std::string& path) {
+  if (!impl_) return false;
+  if (impl_->noise_loaded) return true;
+
+  FILE* f = std::fopen(path.c_str(), "rb");
+  if (!f) {
+    std::fprintf(stderr, "flow: cannot open noise asset %s\n", path.c_str());
+    return false;
+  }
+
+  uint32_t magic = 0, version = 0, mel_dim = 0;
+  uint64_t max_frames = 0;
+  bool ok = std::fread(&magic, 4, 1, f) == 1 &&
+            std::fread(&version, 4, 1, f) == 1 &&
+            std::fread(&mel_dim, 4, 1, f) == 1 &&
+            std::fread(&max_frames, 8, 1, f) == 1;
+  if (!ok || magic != FNSE_MAGIC || version != FNSE_VERSION ||
+      mel_dim != (uint32_t)MEL_DIM || max_frames != (uint64_t)NOISE_MAX_FRAMES) {
+    std::fprintf(stderr,
+                 "flow: bad noise asset header in %s (magic=%08x ver=%u dim=%u max=%llu)\n",
+                 path.c_str(), magic, version, mel_dim,
+                 (unsigned long long)max_frames);
+    std::fclose(f);
+    return false;
+  }
+
+  const size_t n = (size_t)mel_dim * max_frames;
+  impl_->rand_noise.resize(n);
+  ok = std::fread(impl_->rand_noise.data(), 4, n, f) == n;
+  std::fclose(f);
+  if (!ok) {
+    std::fprintf(stderr, "flow: short read on noise asset %s\n", path.c_str());
+    impl_->rand_noise.clear();
+    return false;
+  }
+
+  impl_->noise_loaded = true;
   return true;
 }
 
@@ -231,6 +284,27 @@ bool FlowDecoder::infer(const std::vector<int32_t>& prompt_tokens,
   if (dbuf) ggml_backend_buffer_free(dbuf);
   ggml_free(dctx);
   return true;
+}
+
+bool FlowDecoder::infer(const std::vector<int32_t>& prompt_tokens,
+                        const std::vector<int32_t>& tokens,
+                        const std::vector<float>& prompt_feat,
+                        const std::vector<float>& spk_embedding,
+                        std::vector<float>& mel,
+                        FlowDebug* debug) {
+  if (!impl_ || !impl_->loaded || !impl_->noise_loaded) return false;
+  const int MEL_T = ((int)prompt_tokens.size() + (int)tokens.size()) * TOKEN_MEL_RATIO;
+  const size_t n_xy = (size_t)MEL_T * MEL_DIM;
+  if (impl_->rand_noise.size() < n_xy) return false;
+
+  // Slice the first MEL_T columns of each of the 80 rows ([c][t] row-major).
+  std::vector<float> noise_z(n_xy);
+  for (int c = 0; c < MEL_DIM; c++)
+    for (int t = 0; t < MEL_T; t++)
+      noise_z[(size_t)c * MEL_T + t] =
+          impl_->rand_noise[(size_t)c * NOISE_MAX_FRAMES + t];
+
+  return infer(prompt_tokens, tokens, prompt_feat, spk_embedding, noise_z, mel, debug);
 }
 
 }  // namespace larynx::flow

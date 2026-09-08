@@ -44,6 +44,7 @@ bool load_weights(const std::string& path, ggml_backend_t backend, LLMWeights* o
   out->llm_decoder = get_tensor(wctx, "llm_decoder.weight");
   out->final_norm  = get_tensor(wctx, "llm.model.model.norm.weight");
   out->speech_embedding = get_tensor(wctx, "speech_embedding.weight");
+  out->embed_tokens = get_tensor(wctx, "llm.model.model.embed_tokens.weight");
 
   char pfx[256];
   char name[320];
@@ -94,7 +95,7 @@ bool load_weights(const std::string& path, ggml_backend_t backend, LLMWeights* o
 
   // Verify none of the lookups failed.
   bool ok = out->llm_decoder != nullptr && out->final_norm != nullptr &&
-            out->speech_embedding != nullptr;
+            out->speech_embedding != nullptr && out->embed_tokens != nullptr;
   for (int i = 0; i < N_LAYERS && ok; i++) {
     const auto& l = out->layer[i];
     if (!l.q_w || !l.q_b || !l.k_w || !l.k_b || !l.v_w || !l.v_b || !l.o_w ||

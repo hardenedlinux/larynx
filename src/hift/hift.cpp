@@ -45,6 +45,12 @@ struct HiftVocoder::Impl {
   ggml_backend_t backend = nullptr;
   HiFTWeights w;
   bool loaded = false;
+
+  // SineGen2 fixed source buffers (from load_source): the full 300 s noise bank,
+  // sliced per call. Empty until load_source succeeds.
+  std::vector<float> rand_ini;      // (NB_HARM + 1)
+  std::vector<float> sine_waves;    // (SINE_MAX_SAMPLES * (NB_HARM + 1)) row-major
+  bool source_loaded = false;
 };
 
 HiftVocoder::HiftVocoder() : impl_(new Impl()) {}
@@ -69,6 +75,66 @@ bool HiftVocoder::load(const std::string& path) {
   }
   impl_->loaded = true;
   return true;
+}
+
+namespace {
+
+// On-disk layout of the asset written by tests/export_hift_source.py.
+constexpr uint32_t HSRC_MAGIC = 0x43525348;  // "HSRC"
+constexpr uint32_t HSRC_VERSION = 1;
+
+}  // namespace
+
+bool HiftVocoder::load_source(const std::string& path) {
+  if (!impl_) return false;
+  if (impl_->source_loaded) return true;
+
+  FILE* f = std::fopen(path.c_str(), "rb");
+  if (!f) {
+    std::fprintf(stderr, "hift: cannot open source asset %s\n", path.c_str());
+    return false;
+  }
+
+  uint32_t magic = 0, version = 0, harmonic_dim = 0;
+  uint64_t sine_max = 0;
+  bool ok = std::fread(&magic, 4, 1, f) == 1 &&
+            std::fread(&version, 4, 1, f) == 1 &&
+            std::fread(&harmonic_dim, 4, 1, f) == 1 &&
+            std::fread(&sine_max, 8, 1, f) == 1;
+  if (!ok || magic != HSRC_MAGIC || version != HSRC_VERSION ||
+      harmonic_dim != (uint32_t)(NB_HARM + 1) || sine_max != (uint64_t)SINE_MAX_SAMPLES) {
+    std::fprintf(stderr,
+                 "hift: bad source asset header in %s (magic=%08x ver=%u dim=%u max=%llu)\n",
+                 path.c_str(), magic, version, harmonic_dim,
+                 (unsigned long long)sine_max);
+    std::fclose(f);
+    return false;
+  }
+
+  const size_t rand_n = (size_t)harmonic_dim;
+  const size_t wave_n = (size_t)sine_max * harmonic_dim;
+  impl_->rand_ini.resize(rand_n);
+  impl_->sine_waves.resize(wave_n);
+  ok = std::fread(impl_->rand_ini.data(), 4, rand_n, f) == rand_n &&
+       std::fread(impl_->sine_waves.data(), 4, wave_n, f) == wave_n;
+  std::fclose(f);
+  if (!ok) {
+    std::fprintf(stderr, "hift: short read on source asset %s\n", path.c_str());
+    impl_->rand_ini.clear();
+    impl_->sine_waves.clear();
+    return false;
+  }
+
+  impl_->source_loaded = true;
+  return true;
+}
+
+const std::vector<float>& HiftVocoder::source_rand_ini() const {
+  return impl_->rand_ini;
+}
+
+const std::vector<float>& HiftVocoder::source_sine_waves() const {
+  return impl_->sine_waves;
 }
 
 bool HiftVocoder::vocode(const std::vector<float>& mel,
@@ -246,6 +312,22 @@ bool HiftVocoder::vocode(const std::vector<float>& mel,
   if (gbuf) ggml_backend_buffer_free(gbuf);
   ggml_free(gctx);
   return true;
+}
+
+bool HiftVocoder::vocode(const std::vector<float>& mel, std::vector<float>& audio,
+                        HiFTDebug* debug) {
+  if (!impl_ || !impl_->loaded || !impl_->source_loaded) return false;
+  if (mel.size() % IN_CH != 0) return false;
+  const int T_MEL = (int)(mel.size() / IN_CH);
+  const int L_S = T_MEL * TOTAL_SCALE;
+  const size_t need = (size_t)L_S * (NB_HARM + 1);
+  if (impl_->rand_ini.size() != (size_t)(NB_HARM + 1) ||
+      impl_->sine_waves.size() < need) {
+    return false;
+  }
+  // The exported bank covers the full 300 s; consume only the first L_S rows.
+  std::vector<float> sw(impl_->sine_waves.begin(), impl_->sine_waves.begin() + need);
+  return vocode(mel, impl_->rand_ini, sw, audio, debug);
 }
 
 }  // namespace larynx::hift

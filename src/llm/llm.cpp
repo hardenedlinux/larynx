@@ -60,6 +60,45 @@ bool LLM::load(const std::string& path) {
   return true;
 }
 
+bool LLM::build_lm_input(const std::vector<int>& text_tokens,
+                         const std::vector<int>& prompt_speech_token,
+                         std::vector<float>& lm_input, int* L_out) {
+  if (!impl_ || !impl_->loaded) return false;
+  if (L_out) *L_out = 0;
+
+  const size_t PtT = text_tokens.size();
+  const size_t P = prompt_speech_token.size();
+  for (int t : text_tokens) if (t < 0 || t >= TEXT_VOCAB) return false;
+  for (int t : prompt_speech_token) if (t < 0 || t >= SPEECH_VOCAB) return false;
+
+  const int L = 1 + (int)PtT + 1 + (int)P;
+  lm_input.assign((size_t)L * HIDDEN, 0.0f);
+
+  // Copy one embedding row (HIDDEN contiguous floats) from a weight table laid
+  // out [HIDDEN, NROWS] (ne[0]=HIDDEN fastest) at row `row` into `dst`.
+  auto copy_row = [&](ggml_tensor* table, int row, float* dst) {
+    ggml_backend_tensor_get(table, dst, (size_t)row * HIDDEN * sizeof(float),
+                            HIDDEN * sizeof(float));
+  };
+
+  float* p = lm_input.data();
+  copy_row(impl_->w.speech_embedding, SOS_TOKEN, p);              // 1. sos
+  p += HIDDEN;
+  for (int t : text_tokens) {                                     // 2. embed_tokens(text)
+    copy_row(impl_->w.embed_tokens, t, p);
+    p += HIDDEN;
+  }
+  copy_row(impl_->w.speech_embedding, TASK_ID_TOKEN, p);          // 3. task_id
+  p += HIDDEN;
+  for (int t : prompt_speech_token) {                             // 4. speech_embedding(prompt)
+    copy_row(impl_->w.speech_embedding, t, p);
+    p += HIDDEN;
+  }
+
+  if (L_out) *L_out = L;
+  return true;
+}
+
 bool LLM::prefill(const std::vector<float>& lm_input, int L, LLMDebug* debug) {
   if (!impl_ || !impl_->loaded) return false;
   if (L <= 0 || (int)lm_input.size() != (int64_t)L * HIDDEN) return false;

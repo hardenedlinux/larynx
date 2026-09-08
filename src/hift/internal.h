@@ -40,6 +40,12 @@ constexpr int CONV_PRE_LOOK_RIGHT = 4;
 constexpr int TOTAL_SCALE     = 8 * 5 * 3 * ISTFT_HOP;  // 480
 constexpr float SNAKE_EPS     = 1e-9f;
 
+// SineGen2 builds one fixed unvoiced-noise bank at construction time covering up
+// to 300 s of audio (300 * SAMPLE_RATE = 7,200,000 samples). The C++ vocoder
+// loads the exported bank verbatim (HiftVocoder::load_source) and slices the
+// first L_S = T_MEL * TOTAL_SCALE rows per call — never regenerates it.
+constexpr int SINE_MAX_SAMPLES = 300 * SAMPLE_RATE;   // 7,200,000
+
 // The mel frame count T_MEL is a *runtime* input (the validation case uses 30;
 // real utterances are a few hundred). The derived sizes follow the constants:
 //   L_S      = T_MEL * TOTAL_SCALE                (excitation samples, 14400 @ T_MEL=30)

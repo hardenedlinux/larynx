@@ -145,16 +145,17 @@ target_link_libraries(larynx_hift PUBLIC ggml)
 
 add_library(larynx_pipeline STATIC src/pipeline/pipeline.cpp)
 target_include_directories(larynx_pipeline PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(larynx_pipeline PUBLIC larynx_llm larynx_flow larynx_hift)
 
 # --- Executables -------------------------------------------------------------
 add_executable(larynx src/cli/main.cpp)
 target_link_libraries(larynx PRIVATE
+  larynx_pipeline
   larynx_dsp
   larynx_frontend
   larynx_llm
   larynx_flow
   larynx_hift
-  larynx_pipeline
 )
 
 # Test utility used by tests/verify_dsp.py for the numerical comparison.
@@ -171,6 +172,11 @@ target_link_libraries(larynx_flow_dump PRIVATE larynx_flow)
 add_executable(larynx_hift_dump tests/hift_dump.cpp)
 target_link_libraries(larynx_hift_dump PRIVATE larynx_hift)
 
+# Test utility used by tests/verify_hift_source.py: loads the SineGen2 fixed
+# source asset (load_source) and verifies the round-trip + production vocode.
+add_executable(larynx_hift_source_dump tests/hift_source_dump.cpp)
+target_link_libraries(larynx_hift_source_dump PRIVATE larynx_hift)
+
 # Test utility used by tests/verify_tokenizer.py: runs the C++ text tokenizer
 # and dumps token ids for bit-exact comparison against CosyVoice3Tokenizer.
 add_executable(larynx_tokenizer_dump tests/tokenizer_dump.cpp)
@@ -181,6 +187,12 @@ target_link_libraries(larynx_tokenizer_dump PRIVATE larynx_llm)
 # PyTorch reference.
 add_executable(larynx_llm_dump tests/llm_dump.cpp)
 target_link_libraries(larynx_llm_dump PRIVATE larynx_llm)
+
+# Test utility used by tests/verify_llm_build.py: assembles the CosyVoice3LM
+# lm_input from raw token ids (embed_tokens + speech_embedding lookups + concat)
+# and dumps it for bit-exact comparison against the zero-shot PyTorch reference.
+add_executable(larynx_llm_build_dump tests/llm_build_dump.cpp)
+target_link_libraries(larynx_llm_build_dump PRIVATE larynx_llm)
 
 # Test utility used by tests/verify_llm_decode.py: runs prefill + one KV-cache
 # decode step and dumps the cache + decode logits/final_norm.
@@ -221,6 +233,10 @@ add_test(NAME hift_numerical
   COMMAND ${CMAKE_COMMAND} -E env
           LARYNX_HIFT_DUMP=$<TARGET_FILE:larynx_hift_dump>
           ${LARYNX_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_hift.py)
+add_test(NAME hift_source_numerical
+  COMMAND ${CMAKE_COMMAND} -E env
+          LARYNX_HIFT_SOURCE_DUMP=$<TARGET_FILE:larynx_hift_source_dump>
+          ${LARYNX_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_hift_source.py)
 add_test(NAME tokenizer_numerical
   COMMAND ${CMAKE_COMMAND} -E env
           LARYNX_TOKENIZER_DUMP=$<TARGET_FILE:larynx_tokenizer_dump>
@@ -229,6 +245,10 @@ add_test(NAME llm_numerical
   COMMAND ${CMAKE_COMMAND} -E env
           LARYNX_LLM_DUMP=$<TARGET_FILE:larynx_llm_dump>
           ${LARYNX_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_llm.py)
+add_test(NAME llm_build_numerical
+  COMMAND ${CMAKE_COMMAND} -E env
+          LARYNX_LLM_BUILD_DUMP=$<TARGET_FILE:larynx_llm_build_dump>
+          ${LARYNX_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_llm_build.py)
 add_test(NAME llm_decode_numerical
   COMMAND ${CMAKE_COMMAND} -E env
           LARYNX_LLM_DECODE_DUMP=$<TARGET_FILE:larynx_llm_decode_dump>

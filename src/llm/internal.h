@@ -23,8 +23,15 @@ constexpr int HEAD_DIM      = 64;      // HIDDEN / N_HEADS
 constexpr int KV_DIM        = 128;     // KV_HEADS * HEAD_DIM
 constexpr int N_LAYERS      = 24;      // num_hidden_layers
 constexpr int SPEECH_VOCAB  = 6761;    // speech_embedding rows / llm_decoder cols
+constexpr int TEXT_VOCAB    = 151936;  // embed_tokens rows (Qwen2 text vocab)
 constexpr float RMS_EPS     = 1e-6f;   // rms_norm_eps
 constexpr float ROPE_THETA  = 1000000.0f;  // rope_theta
+
+// CosyVoice3LM special-token ids, all looked up in speech_embedding (not
+// llm_embedding — that is the legacy TransformerLM path). SPEECH_TOKEN_SIZE is
+// defined in sampling.h; kept literal here so internal.h does not depend on it.
+constexpr int SOS_TOKEN     = 6561;    // = speech_token_size + 0  (CosyVoice3LM.sos)
+constexpr int TASK_ID_TOKEN = 6563;    // = speech_token_size + 2  (CosyVoice3LM.task_id)
 
 // ---------------------------------------------------------------------------
 // Loaded weights (resolved by name from llm.gguf; ne = reversed torch shape).
@@ -36,6 +43,7 @@ struct LLMWeights {
   ggml_tensor* llm_decoder = nullptr;  // [HIDDEN, SPEECH_VOCAB] (Linear 896->6761, no bias)
   ggml_tensor* final_norm  = nullptr;  // [HIDDEN]  model.model.norm.weight (applied before llm_decoder)
   ggml_tensor* speech_embedding = nullptr;  // [HIDDEN, SPEECH_VOCAB] Embedding(6761, 896) row lookup for decode
+  ggml_tensor* embed_tokens = nullptr;      // [HIDDEN, TEXT_VOCAB]  Embedding(151936, 896) for the text (prompt_text||text)
 
   struct Layer {
     ggml_tensor* q_w = nullptr;      // [HIDDEN, HIDDEN]

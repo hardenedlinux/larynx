@@ -276,6 +276,24 @@ python3.10 env (`tests/{tokenizer_reference,llm_reference,llm_decode_reference,
 llm_decode_seq_reference,llm_sample_reference,generate_reference}.py`) and the
 `.venv/bin/python tests/verify_*.py` comparators (or `ctest -R llm`).
 
+### CUDA backend validation (RTX 3050, compute capability 8.6)
+
+Checkpoints 3/4 re-run on the CUDA backend via `LARYNX_VERIFY_BACKEND=cuda`
+(unsets the CPU override so `ggml_backend_init_best()` picks `CUDA0`). The
+vendored TF32-disable patch (ADR-0002, `CUBLAS_DEFAULT_MATH` at
+`common.cuh:1505`) is applied. Results match the CPU baseline — the GQA path
+(head broadcast via `ggml_repeat`, attention via `ggml_mul_mat`→cuBLAS
+`CUBLAS_COMPUTE_32F`) carries no TF32 precision loss:
+
+| checkpoint | CUDA rel err (worst) | CPU rel err (worst) | verdict |
+|---|---|---|---|
+| 3 — prefill | h23 **3.0e-6**; logits 3.6e-6 | h23 3.4e-6; logits 2.6e-6 | GREEN |
+| 4 — decode single-step | cache_v_23 **6.5e-6**; logits 1.3e-6 | cache worst 6.1e-6; logits 2.7e-6 | GREEN |
+
+0 stages exceeded 1e-3 (CP3) / 1e-4 (CP4); no YELLOW/RED and no new non-TF32
+numerical issue. TF32 (if present) would land at ~1e-2..3e-2, so these ~1e-6
+numbers confirm the patch covers the full LLM path including GQA.
+
 ---
 
 ## 6. Deferred (per the task scope)

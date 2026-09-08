@@ -83,8 +83,14 @@ def main():
         ref["lm_input"].astype(np.float32).reshape(-1).tofile(os.path.join(indir, "lm_input.f32"))
         np.asarray(ref["next_token"], dtype=np.int32).tofile(os.path.join(indir, "next_token.i32"))
 
-        subprocess.run([dump_bin, gguf, indir, outdir], check=True,
-                       env={**os.environ, "LARYNX_BACKEND": "cpu"})
+        # Default: force CPU (deterministic ctest). LARYNX_VERIFY_BACKEND=cuda
+        # unsets LARYNX_BACKEND so the dump picks ggml_backend_init_best (CUDA).
+        env = dict(os.environ)
+        if os.environ.get("LARYNX_VERIFY_BACKEND") == "cuda":
+            env.pop("LARYNX_BACKEND", None)
+        else:
+            env["LARYNX_BACKEND"] = "cpu"
+        subprocess.run([dump_bin, gguf, indir, outdir], check=True, env=env)
 
         rows = []
 
