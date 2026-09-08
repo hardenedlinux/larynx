@@ -7,6 +7,34 @@ conversion and the acoustic frontend (campplus / speech tokenizer / matcha mel)
 are computed **once, offline, in Python** and frozen into files the C++
 binary loads verbatim.
 
+**It's designed for better deployment in product as a single executable binary file.**
+
+This project is Human architectured and co-authored by AI.
+- LLM: deepseek-v4-pro
+- Coding Assistant: Claude Code
+
+## Deps in runtime
+
+```bash
+ldd larynx
+	linux-vdso.so.1 (0x00007ffceb3fd000)
+	libicuuc.so.74 => /lib/x86_64-linux-gnu/libicuuc.so.74 (0x00007aab5e400000)
+	libgomp.so.1 => /lib/x86_64-linux-gnu/libgomp.so.1 (0x00007aab66b91000)
+	libcudart.so.12 => /lib/x86_64-linux-gnu/libcudart.so.12 (0x00007aab5e000000)
+	libcublas.so.12 => /lib/x86_64-linux-gnu/libcublas.so.12 (0x00007aab57600000)
+	libcuda.so.1 => /lib/x86_64-linux-gnu/libcuda.so.1 (0x00007aab51e00000)
+	libstdc++.so.6 => /lib/x86_64-linux-gnu/libstdc++.so.6 (0x00007aab51a00000)
+	libm.so.6 => /lib/x86_64-linux-gnu/libm.so.6 (0x00007aab5e717000)
+	libgcc_s.so.1 => /lib/x86_64-linux-gnu/libgcc_s.so.1 (0x00007aab66b61000)
+	libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007aab51600000)
+	libicudata.so.74 => /lib/x86_64-linux-gnu/libicudata.so.74 (0x00007aab4f800000)
+	/lib64/ld-linux-x86-64.so.2 (0x00007aab66c0a000)
+	libdl.so.2 => /lib/x86_64-linux-gnu/libdl.so.2 (0x00007aab66b5a000)
+	libpthread.so.0 => /lib/x86_64-linux-gnu/libpthread.so.0 (0x00007aab66b55000)
+	librt.so.1 => /lib/x86_64-linux-gnu/librt.so.1 (0x00007aab66b50000)
+	libcublasLt.so.12 => /lib/x86_64-linux-gnu/libcublasLt.so.12 (0x00007aab2e800000)
+```
+
 ## Status
 
 All four phases are implemented and verified numerically against the PyTorch
