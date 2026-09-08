@@ -1,6 +1,6 @@
 # Larynx
 
-A native reimplementation of the CosyVoice3 text-to-speech pipeline with **zero
+A native reimplementation of the [CosyVoice3](https://github.com/QwenAudio/CosyVoice) text-to-speech pipeline with **zero
 Python at runtime**. The neural networks (LLM / Flow / HiFT) run on
 [GGML](https://github.com/ggml-org/ggml) with CUDA acceleration. Weight
 conversion and the acoustic frontend (campplus / speech tokenizer / matcha mel)
