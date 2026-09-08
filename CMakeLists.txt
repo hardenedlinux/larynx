@@ -96,6 +96,12 @@ endforeach()
 
 add_subdirectory(third_party/ggml)
 
+# --- ICU (Unicode NFC + character properties for the text tokenizer) ---------
+# The Qwen2Tokenizer must be bit-exact with the Rust tokenizers crate, so we use
+# ICU's UCD tables for NFC (unorm2) and \p{L}/\p{N}/\s (uchar) instead of
+# hand-rolled Unicode data.
+find_package(ICU COMPONENTS uc i18n REQUIRED)
+
 # --- DSP frontend (pure C++, no dependencies) --------------------------------
 add_library(larynx_dsp STATIC
   src/dsp/log_mel.cpp
@@ -107,8 +113,15 @@ target_include_directories(larynx_dsp PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
 add_library(larynx_frontend STATIC src/frontend/frontend.cpp)
 target_include_directories(larynx_frontend PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
-add_library(larynx_llm STATIC src/llm/llm.cpp)
+add_library(larynx_llm STATIC
+  src/llm/llm.cpp
+  src/llm/ops.cpp
+  src/llm/gguf.cpp
+  src/llm/tokenizer.cpp
+  src/llm/sampling.cpp
+)
 target_include_directories(larynx_llm PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(larynx_llm PUBLIC ICU::uc ICU::i18n ggml)
 
 add_library(larynx_flow STATIC
   src/flow/flow.cpp
@@ -158,6 +171,38 @@ target_link_libraries(larynx_flow_dump PRIVATE larynx_flow)
 add_executable(larynx_hift_dump tests/hift_dump.cpp)
 target_link_libraries(larynx_hift_dump PRIVATE larynx_hift)
 
+# Test utility used by tests/verify_tokenizer.py: runs the C++ text tokenizer
+# and dumps token ids for bit-exact comparison against CosyVoice3Tokenizer.
+add_executable(larynx_tokenizer_dump tests/tokenizer_dump.cpp)
+target_link_libraries(larynx_tokenizer_dump PRIVATE larynx_llm)
+
+# Test utility used by tests/verify_llm.py: runs the Qwen2 prefill and dumps
+# per-layer hidden states + final_norm + logits for comparison against the
+# PyTorch reference.
+add_executable(larynx_llm_dump tests/llm_dump.cpp)
+target_link_libraries(larynx_llm_dump PRIVATE larynx_llm)
+
+# Test utility used by tests/verify_llm_decode.py: runs prefill + one KV-cache
+# decode step and dumps the cache + decode logits/final_norm.
+add_executable(larynx_llm_decode_dump tests/llm_decode_dump.cpp)
+target_link_libraries(larynx_llm_decode_dump PRIVATE larynx_llm)
+
+# Test utility used by tests/verify_llm_decode_seq.py: runs prefill + the full
+# autoregressive decode (injecting a captured token trajectory) and dumps the
+# per-step llm_decoder logits.
+add_executable(larynx_llm_decode_seq_dump tests/llm_decode_seq_dump.cpp)
+target_link_libraries(larynx_llm_decode_seq_dump PRIVATE larynx_llm)
+
+# Test utility used by tests/verify_llm_sampling.py: reproduces the deterministic
+# nucleus candidate set from raw per-step logits (sampling policy, no model run).
+add_executable(larynx_llm_sample_dump tests/llm_sample_dump.cpp)
+target_link_libraries(larynx_llm_sample_dump PRIVATE larynx_llm)
+
+# Test utility used by tests/verify_generate.py: runs the fully autonomous
+# prefill -> sample -> KV-cache decode -> stop loop (own RNG, no injected history).
+add_executable(larynx_llm_generate_dump tests/llm_generate_dump.cpp)
+target_link_libraries(larynx_llm_generate_dump PRIVATE larynx_llm)
+
 # --- Tests (Python-driven numerical verification) ----------------------------
 # The verify scripts need numpy (+ torch for the flow/hift ones). Use the repo's
 # .venv python rather than the system `python3`, which has neither.
@@ -176,3 +221,27 @@ add_test(NAME hift_numerical
   COMMAND ${CMAKE_COMMAND} -E env
           LARYNX_HIFT_DUMP=$<TARGET_FILE:larynx_hift_dump>
           ${LARYNX_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_hift.py)
+add_test(NAME tokenizer_numerical
+  COMMAND ${CMAKE_COMMAND} -E env
+          LARYNX_TOKENIZER_DUMP=$<TARGET_FILE:larynx_tokenizer_dump>
+          ${LARYNX_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_tokenizer.py)
+add_test(NAME llm_numerical
+  COMMAND ${CMAKE_COMMAND} -E env
+          LARYNX_LLM_DUMP=$<TARGET_FILE:larynx_llm_dump>
+          ${LARYNX_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_llm.py)
+add_test(NAME llm_decode_numerical
+  COMMAND ${CMAKE_COMMAND} -E env
+          LARYNX_LLM_DECODE_DUMP=$<TARGET_FILE:larynx_llm_decode_dump>
+          ${LARYNX_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_llm_decode.py)
+add_test(NAME llm_decode_seq_numerical
+  COMMAND ${CMAKE_COMMAND} -E env
+          LARYNX_LLM_DECODE_SEQ_DUMP=$<TARGET_FILE:larynx_llm_decode_seq_dump>
+          ${LARYNX_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_llm_decode_seq.py)
+add_test(NAME llm_sampling_numerical
+  COMMAND ${CMAKE_COMMAND} -E env
+          LARYNX_LLM_SAMPLE_DUMP=$<TARGET_FILE:larynx_llm_sample_dump>
+          ${LARYNX_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_llm_sampling.py)
+add_test(NAME llm_generate
+  COMMAND ${CMAKE_COMMAND} -E env
+          LARYNX_LLM_GENERATE_DUMP=$<TARGET_FILE:larynx_llm_generate_dump>
+          ${LARYNX_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_generate.py)

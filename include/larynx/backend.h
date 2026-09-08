@@ -15,6 +15,8 @@
 #include "gguf.h"
 
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -22,8 +24,16 @@ namespace larynx {
 
 // Init the best available compute backend (CUDA/GPU when compiled in and a
 // device is present, else CPU). Logs the choice. Returns nullptr on failure.
+// Set LARYNX_BACKEND=cpu to force the CPU backend (used by the numerical
+// verify scripts so they don't depend on an idle GPU).
 inline ggml_backend_t backend_init_best() {
-  ggml_backend_t b = ggml_backend_init_best();
+  const char* force = std::getenv("LARYNX_BACKEND");
+  ggml_backend_t b = nullptr;
+  if (force && std::strcmp(force, "cpu") == 0) {
+    b = ggml_backend_cpu_init();
+  } else {
+    b = ggml_backend_init_best();
+  }
   if (!b) b = ggml_backend_cpu_init();
   if (b) {
     fprintf(stderr, "larynx: ggml backend = %s\n", ggml_backend_name(b));
