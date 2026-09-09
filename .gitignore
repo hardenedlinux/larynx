@@ -39,6 +39,7 @@ tests/tokenizer_cases.bin
 
 # acceptance-gate generated audio + captured flow inputs (tests/acceptance_wavs.py)
 /wavs/
+/wavs_*/
 
 # local checkpoints / converted weights
 *.pt

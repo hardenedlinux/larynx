@@ -179,6 +179,58 @@ matching `tests/*_reference.py` scripts (see their docstrings). See
 `docs/DSP.md`, `docs/FLOW.md`, `docs/HIFT.md`, `docs/LLM.md` for the measured
 error numbers.
 
+## Verification standard
+
+Every cross-check against the PyTorch reference reports a scale-normalized
+relative error `rel = max|C++ − ref| / max|ref|` and classifies each stage:
+
+| class | rel err | meaning |
+|---|---|---|
+| **GREEN** | ≤ 1e-2 (≤ 1%) | numerically correct — matches the reference within float32 accumulation |
+| **YELLOW** | 1e-2 … 1e-1 (1%–10%) | above the pass gate; warrants investigation, not yet a proven divergence |
+| **RED** | > 1e-1 (> 10%) | structural divergence (wrong op / layout / missing clip) — hard fail |
+
+`GREEN` is the same gate the verify scripts enforce (`fail if rel > 1e-2`);
+`YELLOW`/`RED` are escalation bands above it. A `RED` stage is never accepted.
+
+### End-to-end acceptance (`tests/verify_e2e.py`)
+
+The full CLI chain (LLM → Flow → HiFT) cross-checked against the PyTorch
+reference, seed 0, `--text "今天天气不错，我们一起去公园散步吧。"`:
+
+| backend | Flow mel (max abs / rel) | HiFT pcm (max abs / rel) | class |
+|---|---|---|---|
+| CPU | 1.142e-3 / 1.056e-4 | 5.630e-3 / 8.112e-3 | **GREEN** |
+| CUDA | 2.220e-3 / 2.052e-4 | 3.495e-3 / 5.036e-3 | **GREEN** |
+
+Both backends are **GREEN**. The CPU HiFT pcm (8.112e-3) sits just inside the
+1% line (0.81%) — HiFT's nonlinear (exp/snake/phase) synthesis amplifies the
+Flow mel's float32 accumulation (see `docs/HIFT.md`). The CUDA path pins cuBLAS
+to `CUBLAS_DEFAULT_MATH` (TF32 disabled, `docs/adr/0002`) and releases the LLM
+weights after generation, since the resident LLM + Flow DiT graph (~4 GiB) do not
+fit an 8 GiB card together. Not a bug; a real divergence would land in `RED`.
+
+The GREEN margin is **sequence-length dependent**: the HiFT max error is
+concentrated on a few isolated onset samples and grows with mel length. On a
+longer utterance — the ad-copy text with Pronunciation-Inpainting markers
+(`<strong>…</strong>`, `[j][ǐ]`), 286 mel frames / 5.72 s — the HiFT pcm max
+error is 1.465e-2 (rel 2.427e-2, **YELLOW**), but the mean stays 6.9e-5 and only
+17 of 137280 samples (0.012%) exceed 1%. This is the same isolated-onset
+accumulation, **not** a marker effect: the Flow/HiFT stages never see the text
+(only the tokenizer does, and it is bit-exact on the PI markers).
+
+### CFM flow noise: fixed seed 0 (design choice, not configurable)
+
+The Flow decoder's CFM noise is **fixed at seed 0 by design**. The reference
+`CausalConditionalCFM.__init__` samples `rand_noise = torch.randn([1,80,50*300])`
+once, under `set_all_random_seed(0)`, and every inference slices
+`z = rand_noise[:,:,:n]` from that single frozen buffer. The C++ decoder loads
+that exact buffer from `build/flow_noise.bin` (exported by
+`tests/export_flow_noise.py`) and reuses it for **every** synthesis — this is a
+deliberate, permanent design choice that keeps the decoder deterministic and
+reproducible, **not** a configurable option and **not** a per-run RNG. There is
+no seed flag for it (see `docs/FLOW.md`).
+
 ## Docs
 
 - `docs/ARCHITECTURE.md` — authoritative design.

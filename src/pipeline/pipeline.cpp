@@ -95,6 +95,12 @@ bool Pipeline::synthesize(const std::string& instruct,
   }
   out.tokens = gen.tokens;
 
+  // Release the LLM's resident weights (~2.4 GiB on CUDA) before the Flow
+  // decoder builds its DiT graph (~4 GiB): the two do not fit an 8 GiB card
+  // together. This mirrors the Python acceptance gate, which frees model.llm
+  // before running the Flow/HiFT decoders. The LLM is single-shot per synth.
+  impl_->llm.release();
+
   // 4. Flow: speech tokens -> mel (prompt token + matcha mel + spk embedding).
   std::vector<float> mel;
   if (!impl_->flow.infer(prompt.prompt_tokens, to_i32(gen.tokens),

@@ -19,13 +19,14 @@ deterministic, so the expected gap is float32 accumulation (~1e-4..1e-3, see
 verify_flow.py), not a bug.
 
 Runs under the CosyVoice python3.10 env (torch 2.3.1+cu121), NOT the larynx
-``.venv``. CPU-only (CUDA_VISIBLE_DEVICES unset): the DiT graph at full scale
-does not fit the ~2.4 GiB the decoders' GPU load leaves free, and CPU keeps the
-comparison deterministic.
+``.venv``. The Python reference (flow + hift) always runs on CPU for a
+deterministic comparison; `--backend cuda` runs the C++ CLI on CUDA instead
+(needs a GPU with enough free VRAM for all three resident ggufs plus the DiT
+graph — ~5.5 GiB).
 
 Usage:
     ~/.local/share/uv/python/cpython-3.10-linux-x86_64-gnu/bin/python3.10 \
-        tests/verify_e2e.py [--cli build/larynx] [--out-dir wavs] [--text ...]
+        tests/verify_e2e.py [--cli build/larynx] [--out-dir wavs] [--text ...] [--backend cuda]
 """
 
 import argparse
@@ -95,6 +96,8 @@ def main():
     ap.add_argument("--text", default="今天天气不错，我们一起去公园散步吧。")
     ap.add_argument("--instruct", default="You are a helpful assistant. 请用普通话表达。<|endofprompt|>")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--backend", choices=["cpu", "cuda"], default="cpu",
+                    help="run the C++ CLI on CPU or CUDA (the Python reference is always CPU)")
     args = ap.parse_args()
 
     _bootstrap()
@@ -129,7 +132,15 @@ def main():
            "--dump-tokens", cli_tokens,
            "--dump-mel", cli_mel,
            "--dump-audio", cli_audio]
-    env = dict(os.environ, LARYNX_BACKEND="cpu")
+    env = dict(os.environ)
+    if args.backend == "cuda":
+        # Let the CLI auto-select CUDA: undo the CPU-only env the Python
+        # reference relies on (CUDA_VISIBLE_DEVICES set in _bootstrap, and any
+        # LARYNX_BACKEND). The Python flow/hift stay on CPU regardless.
+        env.pop("CUDA_VISIBLE_DEVICES", None)
+        env.pop("LARYNX_BACKEND", None)
+    else:
+        env["LARYNX_BACKEND"] = "cpu"
     print(f"[1/4] running C++ CLI (LLM -> Flow -> HiFT):", flush=True)
     subprocess.run(cmd, check=True, env=env)
 

@@ -3,9 +3,9 @@
 
 Serves a single local web page that plays two WAV files next to each other so
 you can A/B them. Generic by design: pass any two WAV files and their real
-filenames are what get shown on the page — nothing about the labels is
-hardcoded, so this same script is meant to be reused across phases (Flow-only,
-all-GGML, HiFT-only, whatever pair you're comparing) without editing it.
+filenames are what get shown on the page (and used as the URL route) — nothing
+about the labels or routes is hardcoded, so this same script is meant to be
+reused across phases without editing it.
 
 The server is stdlib-only (``http.server``): no pip dependencies, no framework.
 It binds to ``0.0.0.0`` only, serves the two files plus the comparison page,
@@ -31,6 +31,7 @@ import sys
 import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import quote, unquote
 
 
 def get_local_ip():
@@ -50,22 +51,26 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_A = os.path.join(ROOT, "wavs", "wav_ggml_full.wav")
 DEFAULT_B = os.path.join(ROOT, "wavs", "wav_reference.wav")
 
-# Internal route names are intentionally decoupled from the real filenames —
-# the browser doesn't care what the URL path is called, only the labels
-# shown on the page need to reflect the actual files being compared.
-_PATH_A = DEFAULT_A
-_PATH_B = DEFAULT_B
+# Populated in main(): maps the URL route (e.g. "wav_ggml_full.wav") to the
+# actual filesystem path being served under that route. The route is derived
+# from the real filename, not a fixed placeholder — if both files happen to
+# share a basename, the second one gets a disambiguating prefix.
+_ROUTES = {}
 _LABEL_A = os.path.basename(DEFAULT_A)
 _LABEL_B = os.path.basename(DEFAULT_B)
+_ROUTE_A = _LABEL_A
+_ROUTE_B = _LABEL_B
 
 
 def render_page():
-    """Build the HTML fresh from whatever files/labels are currently set,
-    instead of a frozen template with filenames baked in."""
+    """Build the HTML fresh from whatever files/labels/routes are currently
+    set, instead of a frozen template with filenames baked in."""
     label_a = html.escape(_LABEL_A)
     label_b = html.escape(_LABEL_B)
-    path_a = html.escape(_PATH_A)
-    path_b = html.escape(_PATH_B)
+    path_a = html.escape(_ROUTES[_ROUTE_A])
+    path_b = html.escape(_ROUTES[_ROUTE_B])
+    src_a = "/" + quote(_ROUTE_A)
+    src_b = "/" + quote(_ROUTE_B)
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -123,7 +128,7 @@ def render_page():
     <div class="card">
       <span class="tag a">A</span>
       <h2>{label_a}</h2>
-      <audio id="a" controls loop preload="auto" src="/file_a.wav"></audio>
+      <audio id="a" controls loop preload="auto" src="{src_a}"></audio>
       <div class="btn-row">
         <button onclick="play('a')">Play</button>
         <button onclick="stop('a')">Stop</button>
@@ -136,7 +141,7 @@ def render_page():
     <div class="card">
       <span class="tag b">B</span>
       <h2>{label_b}</h2>
-      <audio id="b" controls loop preload="auto" src="/file_b.wav"></audio>
+      <audio id="b" controls loop preload="auto" src="{src_b}"></audio>
       <div class="btn-row">
         <button onclick="play('b')">Play</button>
         <button onclick="stop('b')">Stop</button>
@@ -194,27 +199,27 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _resolve_route(self, path):
+        """path is the raw request path like '/wav_ggml_full.wav'; returns
+        the real filesystem path if it matches a known route, else None."""
+        route = unquote(path.lstrip("/"))
+        return _ROUTES.get(route)
+
     def do_GET(self):
         path = self.path.split("?", 1)[0]
         if path == "/" or path == "/index.html":
             body = render_page().encode()
             self._send(200, body, "text/html; charset=utf-8")
             return
-        if path == "/file_a.wav":
-            self._serve_file(_PATH_A)
-            return
-        if path == "/file_b.wav":
-            self._serve_file(_PATH_B)
+        target = self._resolve_route(path)
+        if target is not None:
+            self._serve_file(target)
             return
         self._send(404, b"not found\n", "text/plain")
 
     def do_HEAD(self):
         path = self.path.split("?", 1)[0]
-        target = None
-        if path == "/file_a.wav":
-            target = _PATH_A
-        elif path == "/file_b.wav":
-            target = _PATH_B
+        target = self._resolve_route(path)
         if target is None or not os.path.isfile(target):
             self.send_response(404)
             self.end_headers()
@@ -287,13 +292,25 @@ def main():
     ap.add_argument("--no-browser", action="store_true", help="don't auto-open the browser")
     args = ap.parse_args()
 
-    global _PATH_A, _PATH_B, _LABEL_A, _LABEL_B
-    _PATH_A = os.path.abspath(args.file_a)
-    _PATH_B = os.path.abspath(args.file_b)
-    _LABEL_A = args.label_a or os.path.basename(_PATH_A)
-    _LABEL_B = args.label_b or os.path.basename(_PATH_B)
+    global _LABEL_A, _LABEL_B, _ROUTE_A, _ROUTE_B, _ROUTES
 
-    for label, p in ((_LABEL_A, _PATH_A), (_LABEL_B, _PATH_B)):
+    path_a = os.path.abspath(args.file_a)
+    path_b = os.path.abspath(args.file_b)
+    _LABEL_A = args.label_a or os.path.basename(path_a)
+    _LABEL_B = args.label_b or os.path.basename(path_b)
+
+    # Route by real filename. If both files share a basename (e.g. two
+    # different directories each containing "output.wav"), disambiguate the
+    # second one so they don't collide on the same URL path.
+    route_a = os.path.basename(path_a)
+    route_b = os.path.basename(path_b)
+    if route_a == route_b:
+        route_b = "b_" + route_b
+
+    _ROUTE_A, _ROUTE_B = route_a, route_b
+    _ROUTES = {route_a: path_a, route_b: path_b}
+
+    for label, p in ((_LABEL_A, path_a), (_LABEL_B, path_b)):
         if not os.path.isfile(p):
             print(f"[warn] not found: {label} -> {p}", file=sys.stderr)
             print("       the page will show it as missing until the file exists.", file=sys.stderr)
@@ -301,8 +318,8 @@ def main():
     server = ThreadingHTTPServer(("0.0.0.0", args.port), Handler)
     url = f"http://{get_local_ip()}:{args.port}/"
     print(f"Serving A/B comparison at {url}")
-    print(f"  A ({_LABEL_A}) : {_PATH_A}")
-    print(f"  B ({_LABEL_B}) : {_PATH_B}")
+    print(f"  A ({_LABEL_A}) : {path_a}  ->  /{quote(_ROUTE_A)}")
+    print(f"  B ({_LABEL_B}) : {path_b}  ->  /{quote(_ROUTE_B)}")
     print("  Ctrl-C to stop.")
 
     if not args.no_browser:
@@ -318,4 +335,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    

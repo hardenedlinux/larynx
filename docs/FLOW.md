@@ -46,10 +46,14 @@ The forward pass, stage by stage:
 6. **CFM Euler** — 10 steps, batch=2 (conditional | unconditional CFG),
    `cfg_rate=0.7`, cosine `t_span`. Final `feat = x[:, :, mel_len1:]`.
 
-The CFM noise is **deterministic**: `CausalConditionalCFM.__init__` runs
-`set_all_random_seed(0)` then `rand_noise = torch.randn([1,80,50*300])`; inference
-uses `z = rand_noise[:,:,:n]` (no per-call randomness). `t_span =
-1 - cos(linspace(0,1,11)·π/2)`.
+The CFM noise is **deterministic by design, not configurable**:
+`CausalConditionalCFM.__init__` runs `set_all_random_seed(0)` then
+`rand_noise = torch.randn([1,80,50*300])`; inference uses
+`z = rand_noise[:,:,:n]` (no per-call randomness). The C++ decoder loads that
+single frozen buffer from `build/flow_noise.bin` and reuses it for **every**
+synthesis — seed 0 is a deliberate, permanent design choice (it is exactly what
+the reference does at construction), not a per-run option and not a test
+accident; there is no flag to change it. `t_span = 1 - cos(linspace(0,1,11)·π/2)`.
 
 **Euler loop (verbatim):** `t=t_span[0]`, `dt=t_span[1]-t_span[0]`. Each step
 builds batch-2 inputs `x_in=[x;x]`, `mu_in=[mu;0]`, `spks_in=[spks;0]`,

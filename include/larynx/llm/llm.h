@@ -92,6 +92,12 @@ class LLM {
   bool generate(const std::vector<float>& lm_input, int L,
                 int min_len, int max_len, unsigned seed, GenerationResult* out);
 
+  // Free the resident weight buffer (2.4 GiB on CUDA) + KV cache and mark the
+  // LLM unloaded, reclaiming VRAM for the downstream Flow decoder (whose DiT
+  // graph is ~4 GiB and does not fit alongside the LLM on an 8 GiB card). The
+  // LLM is single-shot per synthesis; call load() again to reuse.
+  void release();
+
  private:
   struct Impl;
   Impl* impl_;

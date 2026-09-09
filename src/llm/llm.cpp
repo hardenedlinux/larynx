@@ -376,6 +376,19 @@ bool LLM::generate(const std::vector<float>& lm_input, int L,
   return true;
 }
 
+void LLM::release() {
+  if (!impl_) return;
+  if (impl_->w.buffer) { ggml_backend_buffer_free(impl_->w.buffer); impl_->w.buffer = nullptr; }
+  if (impl_->w.ctx) { ggml_free(impl_->w.ctx); impl_->w.ctx = nullptr; }
+  if (impl_->backend) { ggml_backend_free(impl_->backend); impl_->backend = nullptr; }
+  impl_->loaded = false;
+  for (int i = 0; i < N_LAYERS; i++) {
+    impl_->kv_k[i].clear();
+    impl_->kv_v[i].clear();
+  }
+  impl_->cache_len = 0;
+}
+
 int LLM::cache_len() const {
   return impl_ ? impl_->cache_len : 0;
 }
